@@ -1,0 +1,25 @@
+name: LinkedIn Size Check
+
+on:
+  schedule:
+    - cron: "0 0 * * 1-5"  # Lunes–viernes 7pm Colombia (UTC-5 → 00:00 UTC)
+  workflow_dispatch:        # permite correrlo manualmente desde GitHub
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40     # Apify puede tardar varios minutos con muchas URLs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar LinkedIn Size Check
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+        run: python linkedin_size_check.py
