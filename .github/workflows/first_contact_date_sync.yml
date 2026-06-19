@@ -2,7 +2,7 @@ name: First Contact Date Sync
 
 on:
   schedule:
-    - cron: "0 14 * * 5"  # Viernes 9am Colombia (UTC-5 → 14:00 UTC)
+    - cron: "0 0 * * *"  # Todos los días 7pm Colombia (UTC-5 → 00:00 UTC)
   workflow_dispatch:
 
 jobs:
