@@ -2,7 +2,7 @@ name: OG Mirror Sync
 
 on:
   schedule:
-    - cron: "0 0 * * 1-5"  # Lunes–viernes 7pm Colombia (UTC-5 → 00:00 UTC)
+    - cron: "0 0 * * 2-6"  # Lunes–viernes 7pm Colombia (UTC-5 → 00:00 UTC del día siguiente)
   workflow_dispatch:        # permite correrlo manualmente desde GitHub
 
 jobs:
