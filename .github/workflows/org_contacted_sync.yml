@@ -1,0 +1,26 @@
+name: Org Contacted Sync
+
+on:
+  schedule:
+    - cron: "0 15 * * 1-5"   # Lunes-viernes 10:00am Colombia (UTC-5 -> 15:00 UTC)
+    - cron: "30 18 * * 1-5"  # Lunes-viernes 1:30pm Colombia (UTC-5 -> 18:30 UTC)
+    - cron: "0 23 * * 1-5"   # Lunes-viernes 6:00pm Colombia (UTC-5 -> 23:00 UTC)
+  workflow_dispatch:         # permite correrlo manualmente desde GitHub
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Org Contacted Sync
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          TEST_MODE: "false"
+        run: python org_contacted_sync.py
