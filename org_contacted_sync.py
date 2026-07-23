@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """
 Marca "Org First Contact Date" en cada lead activo cuando detecta el primer
-contacto real con esa organización.
+contacto real con esa organización, y mantiene sincronizado el equivalente
+a nivel de organización ("First Contact Date").
 
 Contacto = actividad de WhatsApp, cualquier llamada de Aircall, o un correo
 realmente enviado (last_outgoing_mail_time de la persona).
 
-Regla: solo se llena el campo si el contacto ocurre a menos de 60 días
+Regla lead: solo se llena el campo si el contacto ocurre a menos de 60 días
 (antes o después) del "Prospection Date" propio de ese lead. Una vez
 lleno, nunca se vuelve a tocar (write-once).
+
+Regla organización:
+  - Si "Last Prospection Date" de la org es más reciente que su
+    "First Contact Date", significa que se volvió a prospectar después
+    del último contacto registrado → se limpia First Contact Date
+    (nuevo ciclo, hay que volver a confirmar contacto).
+  - Cuando un lead activo obtiene su propio Org First Contact Date,
+    se revisa la organización: si su First Contact Date está vacío,
+    se llena con ese mismo valor.
 
 TEST_MODE=true → solo procesa hasta MAX_LEADS_TEST_MODE leads pendientes
 (para verificar antes de activar en masa)
@@ -23,11 +33,19 @@ from datetime import datetime, date, timedelta
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
 
+# Campos de lead
 PROSPECTION_DATE_KEY = "2db7aeb0017118ae0c5f9284887c0d55482bbce9"  # Prospection Date
-CONTACT_DATE_KEY = "d81b6ab138f59f521821c5b29f1dc389b7a0cad4"      # Org First Contact Date
+CONTACT_DATE_KEY = "d81b6ab138f59f521821c5b29f1dc389b7a0cad4"      # Org First Contact Date (lead)
 
-WINDOW_DAYS = 60      # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
-LOOKBACK_DAYS = 3      # cuantos dias hacia atras de actividad se revisan en cada corrida
+# Campos de organizacion
+ORG_LAST_PROSPECTION_KEY = "2fd7273aed05f1cbab54ec64bbdb7e5dfe69fd22"  # Last Prospection Date
+ORG_FIRST_CONTACT_KEY = "cd5eb85596e968a2d3cdf9a8785ba1b53982ef7a"     # First Contact Date
+ORG_COUNT_FIRST_CONTACT_KEY = "e117d76508f5bdc87d55c35f3c30dacd10c6f7d9"  # Count - Org First Contact Date (enum)
+ORG_COUNT_ZERO_OPTION = 1412  # "0"
+ORG_COUNT_ONE_OPTION = 1413   # "1"
+
+WINDOW_DAYS = 60       # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
+LOOKBACK_DAYS = 3       # cuantos dias hacia atras de actividad/prospeccion se revisan en cada corrida
 
 CONTACT_ACTIVITY_TYPES = [
     "whatsapp",
@@ -80,13 +98,25 @@ def api_patch(endpoint, data):
     return r.json()
 
 
+def api_put(endpoint, data):
+    rate_limit()
+    r = requests.put(
+        f"{BASE_URL}/{endpoint}",
+        params={"api_token": API_TOKEN},
+        json=data,
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def to_date(s):
     y, m, d = map(int, s[:10].split("-"))
     return date(y, m, d)
 
 
-def get_pending_leads():
-    """Todos los leads activos (no archivados) que aun no tienen Org First Contact Date."""
+def get_active_leads():
+    """Todos los leads activos (no archivados), con o sin Org First Contact Date."""
     leads = []
     start = 0
     while True:
@@ -98,7 +128,7 @@ def get_pending_leads():
             start = pagination["next_start"]
         else:
             break
-    return [l for l in leads if not l.get(CONTACT_DATE_KEY) and l.get(PROSPECTION_DATE_KEY) and l.get("organization_id")]
+    return [l for l in leads if l.get(PROSPECTION_DATE_KEY) and l.get("organization_id")]
 
 
 def get_org_id_from_activity(activity, person_cache):
@@ -167,6 +197,64 @@ def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
     return min(qualifying) if qualifying else None
 
 
+def clear_stale_org_contact_dates(recent_leads, org_cache):
+    """Para orgs con prospeccion reciente, si su First Contact Date quedo
+    vieja (de antes de este nuevo ciclo), la limpia."""
+    cleared = 0
+    seen_orgs = set()
+    for lead in recent_leads:
+        org_id = lead["organization_id"]
+        if org_id in seen_orgs:
+            continue
+        seen_orgs.add(org_id)
+
+        if org_id not in org_cache:
+            try:
+                resp = api_get(f"organizations/{org_id}")
+                org_cache[org_id] = resp.get("data") or {}
+            except Exception:
+                continue
+        org = org_cache[org_id]
+
+        first_contact = org.get(ORG_FIRST_CONTACT_KEY)
+        prosp = lead[PROSPECTION_DATE_KEY]
+        if first_contact and to_date(prosp) > to_date(first_contact):
+            try:
+                api_put(f"organizations/{org_id}", {
+                    ORG_FIRST_CONTACT_KEY: None,
+                    ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ZERO_OPTION,
+                })
+                org_cache[org_id][ORG_FIRST_CONTACT_KEY] = None
+                print(f"  Org {org_id} ('{org.get('name')}'): First Contact Date limpiado (prospeccion nueva {prosp} > contacto viejo {first_contact})")
+                cleared += 1
+            except Exception as e:
+                print(f"  ERROR limpiando org {org_id}: {e}")
+    return cleared
+
+
+def propagate_to_org(org_id, contact_date, org_cache):
+    """Si la org no tiene First Contact Date, la llena con este valor."""
+    if org_id not in org_cache:
+        try:
+            resp = api_get(f"organizations/{org_id}")
+            org_cache[org_id] = resp.get("data") or {}
+        except Exception:
+            return False
+    org = org_cache[org_id]
+    if org.get(ORG_FIRST_CONTACT_KEY):
+        return False
+    try:
+        api_put(f"organizations/{org_id}", {
+            ORG_FIRST_CONTACT_KEY: contact_date,
+            ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ONE_OPTION,
+        })
+        org_cache[org_id][ORG_FIRST_CONTACT_KEY] = contact_date
+        return True
+    except Exception as e:
+        print(f"  ERROR propagando a org {org_id}: {e}")
+        return False
+
+
 def main():
     print(f"\n{'='*60}")
     print(f"Org Contacted Sync — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -174,10 +262,26 @@ def main():
         print(f"MODO TEST: solo se procesaran hasta {MAX_LEADS_TEST_MODE} leads pendientes")
     print(f"{'='*60}\n")
 
-    pending = get_pending_leads()
+    active_leads = get_active_leads()
+    print(f"Leads activos con Prospection Date: {len(active_leads)}")
+
+    org_cache = {}
+
+    # Paso 1: limpiar First Contact Date de orgs re-prospectadas recientemente
+    cutoff = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    recent_leads = [l for l in active_leads if l[PROSPECTION_DATE_KEY][:10] >= cutoff]
+    print(f"Leads con prospeccion en los ultimos {LOOKBACK_DAYS} dias: {len(recent_leads)}")
+    if TEST_MODE:
+        recent_leads = recent_leads[:MAX_LEADS_TEST_MODE]
+        print(f"TEST MODE: revisando limpieza solo en los primeros {len(recent_leads)}.")
+    cleared = clear_stale_org_contact_dates(recent_leads, org_cache)
+    print(f"Orgs con First Contact Date limpiado: {cleared}\n")
+
+    # Paso 2: llenar Org First Contact Date en leads pendientes
+    pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)]
     print(f"Leads activos pendientes de Org First Contact Date: {len(pending)}")
     if not pending:
-        print("Nada que hacer.")
+        print("Nada mas que hacer.")
         return
 
     if TEST_MODE:
@@ -189,11 +293,12 @@ def main():
     org_activity_dates = fetch_recent_activity_dates_by_org(person_cache)
     print(f"Organizaciones con actividad reciente: {len(org_activity_dates)}\n")
 
-    stats = {"updated": 0, "no_match": 0, "error": 0}
+    stats = {"updated": 0, "no_match": 0, "error": 0, "propagated_to_org": 0}
 
     for i, lead in enumerate(pending, 1):
         lead_id = lead["id"]
         title = lead.get("title", "?")
+        org_id = lead["organization_id"]
         contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
 
         if not contact_date:
@@ -210,6 +315,9 @@ def main():
             if resp.get("success"):
                 print(f"[{i}/{len(pending)}] '{title}': Org First Contact Date = {contact_date}")
                 stats["updated"] += 1
+                if propagate_to_org(org_id, contact_date, org_cache):
+                    stats["propagated_to_org"] += 1
+                    print(f"    -> tambien se lleno en la organizacion {org_id}")
             else:
                 stats["error"] += 1
         except Exception as e:
@@ -217,7 +325,8 @@ def main():
             stats["error"] += 1
 
     print(f"\n{'='*60}")
-    print(f"Resumen: {stats['updated']} actualizados, {stats['no_match']} sin contacto en ventana, {stats['error']} errores")
+    print(f"Resumen: {stats['updated']} leads actualizados, {stats['propagated_to_org']} propagados a su org, "
+          f"{stats['no_match']} sin contacto en ventana, {stats['error']} errores")
     print(f"{'='*60}\n")
 
 
