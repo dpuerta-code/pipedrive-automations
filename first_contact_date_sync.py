@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
+DESACTIVADO (2026-07-23): el workflow de GitHub Actions se eliminó.
+Reemplazado por org_contacted_sync.py, que marca First Contact Date con
+la fecha real de contacto (WhatsApp/Aircall/correo) en vez de la fecha
+en que corre el script, y no depende del filtro 47734 (que tenía fechas
+fijas hardcodeadas). Se deja este archivo como referencia histórica.
+
 Para todas las organizaciones del filtro 47734, marca:
   - "Count - Org First Contact Date" = 1
   - "First Contact Date" = fecha de hoy (YYYY-MM-DD)
-
-Corre los viernes vía GitHub Actions (cron 0 14 * * 5 = 9am Colombia).
 """
 
 import os
