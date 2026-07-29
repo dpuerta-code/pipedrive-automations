@@ -2,18 +2,22 @@ name: Lead SAL Archive
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # Todos los días 7pm Colombia (UTC-5 → 00:00 UTC)
+    - cron: "0 0 * * *"  # Todos los dias 7pm Colombia (UTC-5 -> 00:00 UTC)
   workflow_dispatch:
     inputs:
       test_mode:
         description: "TEST_MODE: true = solo lectura, false = ejecuta cambios"
         required: false
         default: "true"
+      backfill_mode:
+        description: "BACKFILL_MODE: true = procesa TODOS los deals open con SAL date lleno (no solo hoy)"
+        required: false
+        default: "false"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -27,4 +31,5 @@ jobs:
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+          BACKFILL_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.backfill_mode || 'false' }}
         run: python lead_sal_archive.py

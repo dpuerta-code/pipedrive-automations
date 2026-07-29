@@ -5,7 +5,8 @@ Para cada organización afectada:
   1. Elimina las tareas (actividades) de todos sus leads activos.
   2. Archiva esos leads.
 
-TEST_MODE=true → muestra qué haría sin ejecutar cambios (solo lectura).
+TEST_MODE=true  → muestra qué haría sin ejecutar cambios (solo lectura).
+BACKFILL_MODE=true → procesa TODOS los deals open con SAL date lleno, sin filtro de fecha.
 Cron GitHub Actions: todos los días 00:00 UTC = 7pm Colombia (UTC-5).
 """
 
@@ -20,6 +21,8 @@ BASE_URL = "https://slang.pipedrive.com/api/v1"
 SAL_DATE_KEY = "8a4d1715b308943f49d7e5b270a7ea81d6f356b2"
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
+# BACKFILL_MODE=true → ignora la fecha y procesa todos los deals open con SAL date lleno
+BACKFILL_MODE = os.environ.get("BACKFILL_MODE", "false").lower() == "true"
 
 request_count = 0
 window_start = time.time()
@@ -69,8 +72,12 @@ def api_delete(endpoint):
     return r.json()
 
 
-def get_deals_with_sal_date_today(today_str):
-    """Deals cuyo SAL date == hoy (YYYY-MM-DD), paginando todos los resultados."""
+def get_deals_with_sal_date(today_str=None):
+    """
+    Pagina todos los deals open con SAL date.
+    Si today_str es None (BACKFILL_MODE), devuelve todos los que tengan SAL date lleno.
+    Si today_str esta definido, filtra solo los de hoy.
+    """
     deals = []
     start = 0
     while True:
@@ -84,7 +91,9 @@ def get_deals_with_sal_date_today(today_str):
             break
         for deal in data:
             sal_date = deal.get(SAL_DATE_KEY)
-            if sal_date and str(sal_date)[:10] == today_str:
+            if not sal_date:
+                continue
+            if today_str is None or str(sal_date)[:10] == today_str:
                 deals.append(deal)
         pagination = resp.get("additional_data", {}).get("pagination", {})
         if pagination.get("more_items_in_collection"):
@@ -105,7 +114,7 @@ def extract_org_id(deal):
 
 
 def get_active_leads_for_org(org_id):
-    """Leads no archivados de una organización."""
+    """Leads no archivados de una organizacion."""
     leads = []
     start = 0
     while True:
@@ -164,7 +173,6 @@ def process_org(org_id, org_name):
         lead_id = lead["id"]
         lead_title = lead.get("title", "?")
 
-        # Eliminar tareas del lead
         try:
             activities = get_activities_for_lead(lead_id)
             if activities:
@@ -173,7 +181,7 @@ def process_org(org_id, org_name):
                 act_id = act["id"]
                 act_subject = act.get("subject", "?")
                 if TEST_MODE:
-                    print(f"      [TEST] Eliminaría tarea {act_id} '{act_subject}'")
+                    print(f"      [TEST] Eliminaria tarea {act_id} '{act_subject}'")
                     deleted += 1
                 else:
                     try:
@@ -187,18 +195,17 @@ def process_org(org_id, org_name):
             print(f"    ERROR obteniendo tareas del lead '{lead_title}': {e}")
             errors += 1
 
-        # Archivar lead
         if TEST_MODE:
-            print(f"    [TEST] Archivaría lead '{lead_title}' ({lead_id})")
+            print(f"    [TEST] Archivaria lead '{lead_title}' ({lead_id})")
             archived += 1
         else:
             try:
                 resp = api_patch(f"leads/{lead_id}", {"is_archived": True})
                 if resp.get("success"):
-                    print(f"    Lead '{lead_title}' ({lead_id}) → archivado")
+                    print(f"    Lead '{lead_title}' ({lead_id}) -> archivado")
                     archived += 1
                 else:
-                    print(f"    Lead '{lead_title}' ({lead_id}) → FAIL al archivar")
+                    print(f"    Lead '{lead_title}' ({lead_id}) -> FAIL al archivar")
                     errors += 1
             except Exception as e:
                 print(f"    ERROR archivando lead {lead_id}: {e}")
@@ -208,23 +215,26 @@ def process_org(org_id, org_name):
 
 
 def main():
-    # Colombia es UTC-5; el script corre a medianoche UTC = 7pm Colombia.
-    # "Hoy" se calcula en hora Colombia para coincidir con el día en que se llenó el SAL date.
     colombia_now = datetime.now(timezone.utc) - timedelta(hours=5)
     today_str = colombia_now.strftime("%Y-%m-%d")
 
     print(f"\n{'='*60}")
-    print(f"Lead SAL Archive — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"Lead SAL Archive -- {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     if TEST_MODE:
-        print("MODO TEST: no se ejecutarán cambios (solo lectura)")
-    print(f"Buscando deals con SAL date = {today_str} (hora Colombia)")
+        print("MODO TEST: no se ejecutaran cambios (solo lectura)")
+    if BACKFILL_MODE:
+        print("BACKFILL MODE: procesando TODOS los deals open con SAL date lleno")
+    else:
+        print(f"Buscando deals con SAL date = {today_str} (hora Colombia)")
     print(f"{'='*60}\n")
 
-    deals = get_deals_with_sal_date_today(today_str)
-    print(f"Deals con SAL date hoy: {len(deals)}\n")
+    deals = get_deals_with_sal_date(None if BACKFILL_MODE else today_str)
+
+    label = "todos con SAL date" if BACKFILL_MODE else "con SAL date hoy"
+    print(f"Deals {label}: {len(deals)}\n")
 
     if not deals:
-        print("Sin deals con SAL date hoy. Nada que hacer.")
+        print(f"Sin deals {label}. Nada que hacer.")
         return
 
     total_leads = 0
@@ -238,11 +248,11 @@ def main():
         org_id, org_name = extract_org_id(deal)
         sal_date = deal.get(SAL_DATE_KEY, "?")
 
-        print(f"[{i}/{len(deals)}] Deal '{deal_title}' (id={deal_id}) — SAL date={sal_date}")
+        print(f"[{i}/{len(deals)}] Deal '{deal_title}' (id={deal_id}) -- SAL date={sal_date}")
         print(f"  Org: {org_id} '{org_name}'")
 
         if not org_id:
-            print("  SKIP: deal sin organización vinculada")
+            print("  SKIP: deal sin organizacion vinculada")
             continue
 
         if org_id in orgs_processed:
@@ -257,7 +267,7 @@ def main():
 
     print(f"\n{'='*60}")
     if TEST_MODE:
-        print(f"[TEST] Habría archivado {total_leads} leads y eliminado {total_tasks} tareas")
+        print(f"[TEST] Habria archivado {total_leads} leads y eliminado {total_tasks} tareas")
     else:
         print(f"Resumen: {total_leads} leads archivados, {total_tasks} tareas eliminadas, {total_errors} errores")
     print(f"Orgs procesadas: {len(orgs_processed)}")
