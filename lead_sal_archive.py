@@ -10,6 +10,7 @@ BACKFILL_MODE=true → procesa TODOS los deals open con SAL date lleno, sin filt
 Cron GitHub Actions: todos los días 00:00 UTC = 7pm Colombia (UTC-5).
 """
 
+import json
 import os
 import requests
 import time
@@ -236,6 +237,32 @@ def main():
     if not deals:
         print(f"Sin deals {label}. Nada que hacer.")
         return
+
+    # Construir backup antes de tocar nada
+    print("Construyendo backup de leads a archivar...")
+    backup = []
+    orgs_seen = set()
+    for deal in deals:
+        org_id, org_name = extract_org_id(deal)
+        if not org_id or org_id in orgs_seen:
+            continue
+        orgs_seen.add(org_id)
+        leads = get_active_leads_for_org(org_id)
+        for lead in leads:
+            backup.append({
+                "lead_id": lead["id"],
+                "lead_title": lead.get("title", "?"),
+                "org_id": org_id,
+                "org_name": org_name,
+                "deal_id": deal["id"],
+                "deal_title": deal.get("title", "?"),
+                "sal_date": deal.get(SAL_DATE_KEY, "?"),
+            })
+
+    backup_path = "lead_sal_archive_backup.json"
+    with open(backup_path, "w") as f:
+        json.dump(backup, f, indent=2, ensure_ascii=False)
+    print(f"Backup guardado: {backup_path} ({len(backup)} leads)\n")
 
     total_leads = 0
     total_tasks = 0

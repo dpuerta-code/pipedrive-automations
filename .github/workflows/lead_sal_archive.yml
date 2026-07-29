@@ -33,3 +33,11 @@ jobs:
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
           BACKFILL_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.backfill_mode || 'false' }}
         run: python lead_sal_archive.py
+
+      - name: Subir backup como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-sal-backup-${{ github.run_id }}
+          path: lead_sal_archive_backup.json
+          if-no-files-found: ignore
