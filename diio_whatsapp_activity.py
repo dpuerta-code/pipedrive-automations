@@ -65,6 +65,18 @@ def api_post(endpoint, data):
     return r.json()
 
 
+def api_patch(endpoint, data):
+    rate_limit()
+    r = requests.patch(
+        f"{BASE_URL}/{endpoint}",
+        params={"api_token": API_TOKEN},
+        json=data,
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def get_notes_in_window(since_date_str, until_date_str):
     """
     Pagina todas las notas en el rango de fechas (filtro por add_time).
@@ -92,11 +104,14 @@ def get_notes_in_window(since_date_str, until_date_str):
     return notes
 
 
-def activity_exists(deal_id, lead_id, due_date):
+def find_existing_whatsapp_activity(deal_id, lead_id, due_date):
     """
-    Comprueba si ya existe una actividad 'Whatsapp Message Diio'
-    para este deal/lead en esta fecha.
+    Busca cualquier actividad de tipo whatsapp para este deal/lead en esta fecha.
+    Retorna la actividad encontrada (dict) o None.
+    Prioridad: si ya existe 'Whatsapp Message Diio', la retorna primero.
     """
+    candidates = []
+
     if deal_id:
         try:
             resp = api_get(f"deals/{deal_id}/activities", {
@@ -105,8 +120,8 @@ def activity_exists(deal_id, lead_id, due_date):
                 "limit": 200,
             })
             for act in (resp.get("data") or []):
-                if act.get("subject") == ACTIVITY_SUBJECT and act.get("due_date") == due_date:
-                    return True
+                if act.get("type") == ACTIVITY_TYPE and act.get("due_date") == due_date:
+                    candidates.append(act)
         except Exception:
             pass
 
@@ -120,12 +135,18 @@ def activity_exists(deal_id, lead_id, due_date):
                 "limit": 200,
             })
             for act in (resp.get("data") or []):
-                if act.get("subject") == ACTIVITY_SUBJECT:
-                    return True
+                if act.get("type") == ACTIVITY_TYPE:
+                    candidates.append(act)
         except Exception:
             pass
 
-    return False
+    if not candidates:
+        return None
+    # Si ya está la versión Diio, devolverla primero (así se skippea sin tocar)
+    for act in candidates:
+        if act.get("subject") == ACTIVITY_SUBJECT:
+            return act
+    return candidates[0]
 
 
 def main():
@@ -173,6 +194,7 @@ def main():
         return
 
     created = 0
+    replaced = 0
     skipped = 0
     errors = 0
 
@@ -190,12 +212,37 @@ def main():
 
         print(f"Nota {note_id} | {entity} | rep: {user_name} | fecha: {note_date}")
 
-        # Guard: evitar duplicado
-        if activity_exists(deal_id, lead_id, note_date):
-            print(f"  SKIP: ya existe '{ACTIVITY_SUBJECT}' para {entity} en {note_date}")
-            skipped += 1
+        existing = find_existing_whatsapp_activity(deal_id, lead_id, note_date)
+
+        if existing:
+            existing_subject = existing.get("subject", "")
+            existing_id = existing["id"]
+
+            # Ya está procesada con el nombre correcto
+            if existing_subject == ACTIVITY_SUBJECT:
+                print(f"  SKIP: ya existe '{ACTIVITY_SUBJECT}' (id={existing_id}) para {entity} en {note_date}")
+                skipped += 1
+                continue
+
+            # Existe una actividad whatsapp con otro nombre → reemplazar
+            if TEST_MODE:
+                print(f"  [TEST] Reemplazaría actividad {existing_id} '{existing_subject}' → '{ACTIVITY_SUBJECT}'")
+                replaced += 1
+            else:
+                try:
+                    resp = api_patch(f"activities/{existing_id}", {"subject": ACTIVITY_SUBJECT})
+                    if resp.get("success"):
+                        print(f"  Actividad {existing_id} renombrada: '{existing_subject}' → '{ACTIVITY_SUBJECT}'")
+                        replaced += 1
+                    else:
+                        print(f"  ERROR renombrando actividad {existing_id}: {resp}")
+                        errors += 1
+                except Exception as e:
+                    print(f"  ERROR renombrando actividad {existing_id}: {e}")
+                    errors += 1
             continue
 
+        # No existe → crear nueva
         payload = {
             "subject": ACTIVITY_SUBJECT,
             "type": ACTIVITY_TYPE,
@@ -231,9 +278,9 @@ def main():
 
     print(f"\n{'='*60}")
     if TEST_MODE:
-        print(f"[TEST] Habría creado {created} actividades, {skipped} ya existían, {errors} errores")
+        print(f"[TEST] Habría creado {created}, reemplazado {replaced}, {skipped} ya existían, {errors} errores")
     else:
-        print(f"Resumen: {created} actividades creadas, {skipped} ya existían, {errors} errores")
+        print(f"Resumen: {created} creadas, {replaced} reemplazadas, {skipped} ya existían, {errors} errores")
     print(f"{'='*60}\n")
 
 
