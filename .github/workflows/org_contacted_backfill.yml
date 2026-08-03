@@ -1,0 +1,35 @@
+name: Org Contacted Backfill (historico)
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "true = solo probar con 5 leads, false = correr todo"
+        required: true
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Org Contacted Backfill
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          TEST_MODE: ${{ github.event.inputs.test_mode }}
+        run: python org_contacted_backfill.py
+
+      - name: Guardar log de cambios
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-v2-result-log
+          path: backfill_v2_result_log.json
+          if-no-files-found: ignore
