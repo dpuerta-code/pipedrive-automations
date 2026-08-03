@@ -3,6 +3,7 @@ name: Diio WhatsApp Activity Sync
 on:
   schedule:
     - cron: "0 17 * * *"   # 12pm Colombia (UTC-5 → 17:00 UTC)
+    - cron: "0 20 * * *"   # 3pm Colombia (UTC-5 → 20:00 UTC)
     - cron: "0 0 * * *"    # 7pm Colombia (UTC-5 → 00:00 UTC)
   workflow_dispatch:
     inputs:
