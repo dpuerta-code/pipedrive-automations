@@ -3,7 +3,9 @@ name: Org Contacted Sync
 on:
   schedule:
     - cron: "0 15 * * 1-5"   # Lunes-viernes 10:00am Colombia (UTC-5 -> 15:00 UTC)
+    - cron: "30 16 * * 1-5"  # Lunes-viernes 11:30am Colombia (UTC-5 -> 16:30 UTC)
     - cron: "30 18 * * 1-5"  # Lunes-viernes 1:30pm Colombia (UTC-5 -> 18:30 UTC)
+    - cron: "0 20 * * 1-5"   # Lunes-viernes 3:00pm Colombia (UTC-5 -> 20:00 UTC)
     - cron: "0 23 * * 1-5"   # Lunes-viernes 6:00pm Colombia (UTC-5 -> 23:00 UTC)
   workflow_dispatch:         # permite correrlo manualmente desde GitHub
 
