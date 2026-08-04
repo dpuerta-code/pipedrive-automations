@@ -61,9 +61,9 @@ def api_get(endpoint, params=None):
     return r.json()
 
 
-def api_patch(endpoint, data):
+def api_put(endpoint, data):
     rate_limit()
-    r = requests.patch(
+    r = requests.put(
         f"{BASE_URL}/{endpoint}",
         params={"api_token": API_TOKEN},
         json=data,
@@ -193,7 +193,7 @@ def main():
                 stats["updated"] += 1
             else:
                 try:
-                    resp = api_patch(f"organizations/{org_id}", {ORG_LAST_PROSPECTION_KEY: new_pd_str})
+                    resp = api_put(f"organizations/{org_id}", {ORG_LAST_PROSPECTION_KEY: new_pd_str})
                     if resp.get("success"):
                         print(f"Org '{org_name}' ({org_id}): Last Prospection Date = {new_pd_str} (primer valor)")
                         org_cache[org_id][ORG_LAST_PROSPECTION_KEY] = new_pd_str
@@ -241,7 +241,7 @@ def main():
             stats["updated"] += 1
         else:
             try:
-                resp = api_patch(f"organizations/{org_id}", {ORG_LAST_PROSPECTION_KEY: new_pd_str})
+                resp = api_put(f"organizations/{org_id}", {ORG_LAST_PROSPECTION_KEY: new_pd_str})
                 if resp.get("success"):
                     print(
                         f"Org '{org_name}' ({org_id}): {current_lpd_str} → {new_pd_str} ({reason})"
