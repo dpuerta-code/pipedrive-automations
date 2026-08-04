@@ -92,12 +92,12 @@ def get_owner_name(lead):
     return str(owner)
 
 
-def get_all_active_leads():
-    """Todos los leads activos con Prospection Date y org vinculada."""
+def get_leads(archived_status="not_archived"):
+    """Leads con Prospection Date y org vinculada. archived_status: not_archived | archived | all."""
     leads = []
     start = 0
     while True:
-        resp = api_get("leads", {"limit": 500, "start": start, "archived_status": "not_archived"})
+        resp = api_get("leads", {"limit": 500, "start": start, "archived_status": archived_status})
         data = resp.get("data") or []
         leads.extend(data)
         pagination = resp.get("additional_data", {}).get("pagination", {})
@@ -125,16 +125,19 @@ def main():
         print("MODO TEST: no se ejecutarán cambios")
     print(f"{'='*60}\n")
 
-    # 1. Obtener todos los leads activos con Prospection Date
-    all_leads = get_all_active_leads()
-    print(f"Leads activos con Prospection Date: {len(all_leads)}")
+    # 1. Cargar leads activos (para determinar new_lead y orgs a procesar)
+    #    y leads archivados (para comparar owner en old_lead)
+    active_leads = get_leads("not_archived")
+    archived_leads = get_leads("archived")
+    print(f"Leads activos con Prospection Date: {len(active_leads)}")
+    print(f"Leads archivados con Prospection Date: {len(archived_leads)}")
 
-    # 2. Determinar qué orgs procesar: solo las que tienen un lead nuevo
+    # 2. Determinar qué orgs procesar: solo las que tienen un lead activo nuevo
     #    creado en los últimos LOOKBACK_DAYS días
     cutoff = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     recent_org_ids = {
         l["organization_id"]
-        for l in all_leads
+        for l in active_leads
         if (l.get("add_time") or "")[:10] >= cutoff
     }
     print(f"Orgs con leads nuevos en los últimos {LOOKBACK_DAYS} días: {len(recent_org_ids)}\n")
@@ -143,10 +146,15 @@ def main():
         print("Nada que procesar.")
         return
 
-    # Índice de leads por org para búsqueda rápida
+    # Índice de leads activos por org (para encontrar new_lead)
     leads_by_org = {}
-    for l in all_leads:
+    for l in active_leads:
         leads_by_org.setdefault(l["organization_id"], []).append(l)
+
+    # Índice de TODOS los leads por org (activos + archivados, para encontrar old_lead)
+    all_leads_by_org = {}
+    for l in active_leads + archived_leads:
+        all_leads_by_org.setdefault(l["organization_id"], []).append(l)
 
     org_cache = {}
     stats = {"updated": 0, "skipped_same_owner": 0, "skipped_no_change": 0, "errors": 0}
@@ -198,9 +206,15 @@ def main():
                     stats["errors"] += 1
             continue
 
-        # Buscar el "lead anterior": el más reciente con Prospection Date <= current_lpd
+        # Buscar el "lead anterior" en todos los leads (activos + archivados):
+        # el más reciente con Prospection Date <= current_lpd
+        org_all_leads = sorted(
+            all_leads_by_org.get(org_id, []),
+            key=lambda l: str(l.get(PROSPECTION_DATE_KEY) or ""),
+            reverse=True,
+        )
         old_lead = next(
-            (l for l in org_leads if l["id"] != new_lead["id"]
+            (l for l in org_all_leads if l["id"] != new_lead["id"]
              and str(l.get(PROSPECTION_DATE_KEY) or "")[:10] <= current_lpd_str),
             None,
         )
