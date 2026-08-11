@@ -131,6 +131,29 @@ def get_active_leads():
     return [l for l in leads if l.get(PROSPECTION_DATE_KEY) and l.get("organization_id")]
 
 
+def get_active_deals():
+    """Deals abiertos con org vinculada."""
+    deals = []
+    start = 0
+    while True:
+        resp = api_get("deals", {"status": "open", "limit": 500, "start": start})
+        data = resp.get("data") or []
+        deals.extend(data)
+        pagination = resp.get("additional_data", {}).get("pagination", {})
+        if pagination.get("more_items_in_collection"):
+            start = pagination["next_start"]
+        else:
+            break
+    return [d for d in deals if d.get("org_id")]
+
+
+def extract_id(field):
+    """Extrae el ID de un campo que puede ser int o dict con 'value'."""
+    if isinstance(field, dict):
+        return field.get("value")
+    return field
+
+
 def get_org_id_from_activity(activity, person_cache):
     org = activity.get("org_id")
     if org:
@@ -280,11 +303,7 @@ def main():
     # Paso 2: llenar Org First Contact Date en leads pendientes
     pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)]
     print(f"Leads activos pendientes de Org First Contact Date: {len(pending)}")
-    if not pending:
-        print("Nada mas que hacer.")
-        return
-
-    if TEST_MODE:
+    if TEST_MODE and pending:
         pending = pending[:MAX_LEADS_TEST_MODE]
         print(f"TEST MODE: procesando solo los primeros {len(pending)}.\n")
 
@@ -295,7 +314,7 @@ def main():
 
     stats = {"updated": 0, "no_match": 0, "error": 0, "propagated_to_org": 0}
 
-    for i, lead in enumerate(pending, 1):
+    for i, lead in enumerate(pending or [], 1):
         lead_id = lead["id"]
         title = lead.get("title", "?")
         org_id = lead["organization_id"]
@@ -324,9 +343,76 @@ def main():
             print(f"[{i}/{len(pending)}] ERROR en lead {lead_id}: {e}")
             stats["error"] += 1
 
+    # Paso 3: orgs con deal activo pero sin lead activo y sin First Contact Date
+    lead_org_ids = {l["organization_id"] for l in active_leads}
+    active_deals = get_active_deals()
+
+    deal_orgs = {}
+    for d in active_deals:
+        org_id = extract_id(d.get("org_id"))
+        if org_id and org_id not in lead_org_ids:
+            deal_orgs.setdefault(org_id, d)
+
+    print(f"\nOrgs con deal activo sin lead activo: {len(deal_orgs)}")
+    deal_contacted = 0
+
+    for org_id, deal in deal_orgs.items():
+        # Cargar org si no está en cache
+        if org_id not in org_cache:
+            try:
+                resp = api_get(f"organizations/{org_id}")
+                org_cache[org_id] = resp.get("data") or {}
+            except Exception:
+                continue
+        org = org_cache[org_id]
+
+        # Si ya tiene First Contact Date, skip
+        if org.get(ORG_FIRST_CONTACT_KEY):
+            continue
+
+        # Actividades recientes de la org
+        activity_dates = list(org_activity_dates.get(org_id, []))
+
+        # Email: last_outgoing_mail_time de la persona del deal
+        person_id = extract_id(deal.get("person_id"))
+        if person_id:
+            if person_id not in person_cache:
+                try:
+                    resp = api_get(f"persons/{person_id}")
+                    person_cache[person_id] = resp.get("data") or {}
+                except Exception:
+                    person_cache[person_id] = {}
+            mail_time = person_cache[person_id].get("last_outgoing_mail_time")
+            if mail_time:
+                activity_dates.append(mail_time[:10])
+
+        if not activity_dates:
+            continue
+
+        contact_date = min(activity_dates)
+        org_name = org.get("name", str(org_id))
+
+        if TEST_MODE:
+            print(f"  [TEST] Deal org '{org_name}' ({org_id}): pondría First Contact Date = {contact_date}")
+            deal_contacted += 1
+        else:
+            try:
+                api_put(f"organizations/{org_id}", {
+                    ORG_FIRST_CONTACT_KEY: contact_date,
+                    ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ONE_OPTION,
+                })
+                org_cache[org_id][ORG_FIRST_CONTACT_KEY] = contact_date
+                print(f"  Deal org '{org_name}' ({org_id}): First Contact Date = {contact_date}")
+                deal_contacted += 1
+            except Exception as e:
+                print(f"  ERROR en deal org {org_id}: {e}")
+
+    print(f"Orgs con deal actualizadas: {deal_contacted}")
+
     print(f"\n{'='*60}")
     print(f"Resumen: {stats['updated']} leads actualizados, {stats['propagated_to_org']} propagados a su org, "
-          f"{stats['no_match']} sin contacto en ventana, {stats['error']} errores")
+          f"{stats['no_match']} sin contacto en ventana, {stats['error']} errores, "
+          f"{deal_contacted} orgs con deal actualizadas")
     print(f"{'='*60}\n")
 
 
