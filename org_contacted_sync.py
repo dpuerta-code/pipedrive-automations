@@ -46,6 +46,7 @@ ORG_COUNT_ONE_OPTION = 1413   # "1"
 
 WINDOW_DAYS = 60       # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
 LOOKBACK_DAYS = 3       # cuantos dias hacia atras de actividad/prospeccion se revisan en cada corrida
+DEAL_LOOKBACK_DAYS = 2  # deals creados hace mas de N dias se ignoran en el Paso 3
 
 CONTACT_ACTIVITY_TYPES = [
     "whatsapp",
@@ -343,20 +344,36 @@ def main():
             print(f"[{i}/{len(pending)}] ERROR en lead {lead_id}: {e}")
             stats["error"] += 1
 
-    # Paso 3: orgs con deal activo pero sin lead activo y sin First Contact Date
+    # Paso 3: orgs con deal activo reciente pero sin lead activo y sin First Contact Date
+    # Solo se considera el deal más reciente por org, y solo si fue creado hace <= DEAL_LOOKBACK_DAYS días.
     lead_org_ids = {l["organization_id"] for l in active_leads}
     active_deals = get_active_deals()
 
-    deal_orgs = {}
+    # Por org: quedarse con el deal creado más recientemente
+    deal_orgs_all = {}
     for d in active_deals:
         org_id = extract_id(d.get("org_id"))
-        if org_id and org_id not in lead_org_ids:
-            deal_orgs.setdefault(org_id, d)
+        if not org_id or org_id in lead_org_ids:
+            continue
+        existing = deal_orgs_all.get(org_id)
+        if not existing or (d.get("add_time", "") > existing.get("add_time", "")):
+            deal_orgs_all[org_id] = d
 
-    print(f"\nOrgs con deal activo sin lead activo: {len(deal_orgs)}")
+    # Filtrar: solo deals creados en los últimos DEAL_LOOKBACK_DAYS días
+    deal_cutoff = (date.today() - timedelta(days=DEAL_LOOKBACK_DAYS)).isoformat()
+    deal_orgs = {
+        org_id: d for org_id, d in deal_orgs_all.items()
+        if (d.get("add_time") or "")[:10] >= deal_cutoff
+    }
+
+    print(f"\nOrgs con deal activo sin lead activo (total): {len(deal_orgs_all)}")
+    print(f"Orgs con deal creado en los ultimos {DEAL_LOOKBACK_DAYS} dias: {len(deal_orgs)}")
     deal_contacted = 0
 
     for org_id, deal in deal_orgs.items():
+        deal_id = deal.get("id")
+        deal_created = (deal.get("add_time") or "")[:10]
+
         # Cargar org si no está en cache
         if org_id not in org_cache:
             try:
@@ -393,7 +410,7 @@ def main():
         org_name = org.get("name", str(org_id))
 
         if TEST_MODE:
-            print(f"  [TEST] Deal org '{org_name}' ({org_id}): pondría First Contact Date = {contact_date}")
+            print(f"  [TEST] Deal org '{org_name}' ({org_id}): pondría First Contact Date = {contact_date} [deal {deal_id}, creado {deal_created}]")
             deal_contacted += 1
         else:
             try:
@@ -402,10 +419,10 @@ def main():
                     ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ONE_OPTION,
                 })
                 org_cache[org_id][ORG_FIRST_CONTACT_KEY] = contact_date
-                print(f"  Deal org '{org_name}' ({org_id}): First Contact Date = {contact_date}")
+                print(f"  Deal org '{org_name}' ({org_id}): First Contact Date = {contact_date} [deal {deal_id}, creado {deal_created}]")
                 deal_contacted += 1
             except Exception as e:
-                print(f"  ERROR en deal org {org_id}: {e}")
+                print(f"  ERROR en deal org {org_id} [deal {deal_id}]: {e}")
 
     print(f"Orgs con deal actualizadas: {deal_contacted}")
 
