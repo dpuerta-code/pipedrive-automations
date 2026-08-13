@@ -242,14 +242,17 @@ def clear_stale_org_contact_dates(recent_leads, org_cache):
 
         first_contact = org.get(ORG_FIRST_CONTACT_KEY)
         prosp = lead[PROSPECTION_DATE_KEY]
-        if first_contact and to_date(prosp) > to_date(first_contact):
+        # Solo limpiar si el gap es >=60 días (nueva sesión real según regla de Metabase).
+        # Si el gap es <60 días, la nueva prospección es continuación de la misma sesión → no tocar.
+        if first_contact and (to_date(prosp) - to_date(first_contact)).days >= WINDOW_DAYS:
             try:
                 api_put(f"organizations/{org_id}", {
                     ORG_FIRST_CONTACT_KEY: None,
                     ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ZERO_OPTION,
                 })
                 org_cache[org_id][ORG_FIRST_CONTACT_KEY] = None
-                print(f"  Org {org_id} ('{org.get('name')}'): First Contact Date limpiado (prospeccion nueva {prosp} > contacto viejo {first_contact})")
+                gap_days = (to_date(prosp) - to_date(first_contact)).days
+                print(f"  Org {org_id} ('{org.get('name')}'): FCD limpiado (nueva sesion: {gap_days}d desde {first_contact})")
                 cleared += 1
             except Exception as e:
                 print(f"  ERROR limpiando org {org_id}: {e}")
@@ -257,7 +260,12 @@ def clear_stale_org_contact_dates(recent_leads, org_cache):
 
 
 def propagate_to_org(org_id, contact_date, org_cache):
-    """Si la org no tiene First Contact Date, la llena con este valor."""
+    """Actualiza First Contact Date de la org según la regla de sesión de 60 días.
+
+    - Sin FCD existente → se llena (primera sesión).
+    - FCD existente con gap >= WINDOW_DAYS → nueva sesión, se actualiza.
+    - FCD existente con gap <  WINDOW_DAYS → misma sesión, se conserva el FCD original.
+    """
     if org_id not in org_cache:
         try:
             resp = api_get(f"organizations/{org_id}")
@@ -265,8 +273,12 @@ def propagate_to_org(org_id, contact_date, org_cache):
         except Exception:
             return False
     org = org_cache[org_id]
-    if org.get(ORG_FIRST_CONTACT_KEY):
-        return False
+    existing = org.get(ORG_FIRST_CONTACT_KEY)
+    if existing:
+        gap = (to_date(contact_date) - to_date(existing)).days
+        if gap < WINDOW_DAYS:
+            return False  # misma sesión, conservar FCD original
+        # gap >= WINDOW_DAYS → nueva sesión, actualizar
     try:
         api_put(f"organizations/{org_id}", {
             ORG_FIRST_CONTACT_KEY: contact_date,
@@ -300,6 +312,34 @@ def main():
         print(f"TEST MODE: revisando limpieza solo en los primeros {len(recent_leads)}.")
     cleared = clear_stale_org_contact_dates(recent_leads, org_cache)
     print(f"Orgs con First Contact Date limpiado: {cleared}\n")
+
+    # Paso 1.5: sincronizar FCD de org para leads que YA tienen contacto confirmado.
+    # Cubre Causa #3: org atascada con FCD viejo porque no nació un lead nuevo que
+    # disparara la limpieza, pero el lead sí tiene un contacto genuino de sesión nueva.
+    contacted_leads = [l for l in active_leads if l.get(CONTACT_DATE_KEY)]
+    # Por org: quedarse con el lead que tenga el contacto más reciente
+    org_to_contacted = {}
+    for l in contacted_leads:
+        oid = l["organization_id"]
+        cdate = str(l.get(CONTACT_DATE_KEY) or "")[:10]
+        existing_l = org_to_contacted.get(oid)
+        if not existing_l or cdate > str(existing_l.get(CONTACT_DATE_KEY) or "")[:10]:
+            org_to_contacted[oid] = l
+    # Solo contactos dentro de la última ventana de 60 días (evita reprocesar todo el histórico)
+    contact_cutoff = (date.today() - timedelta(days=WINDOW_DAYS)).isoformat()
+    org_to_contacted = {
+        oid: l for oid, l in org_to_contacted.items()
+        if str(l.get(CONTACT_DATE_KEY) or "")[:10] >= contact_cutoff
+    }
+    print(f"Leads con contacto en últimos {WINDOW_DAYS} días para sincronizar org: {len(org_to_contacted)}")
+    new_sessions_propagated = 0
+    for org_id, lead in org_to_contacted.items():
+        contact_date = str(lead[CONTACT_DATE_KEY])[:10]
+        if propagate_to_org(org_id, contact_date, org_cache):
+            new_sessions_propagated += 1
+            org_name = (org_cache.get(org_id) or {}).get("name", str(org_id))
+            print(f"  Org '{org_name}' ({org_id}): FCD → {contact_date} (sesion nueva detectada en lead existente)")
+    print(f"Orgs actualizadas por nueva sesión en lead existente: {new_sessions_propagated}\n")
 
     # Paso 2: llenar Org First Contact Date en leads pendientes
     pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)]
@@ -428,6 +468,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Resumen: {stats['updated']} leads actualizados, {stats['propagated_to_org']} propagados a su org, "
+          f"{new_sessions_propagated} sesiones nuevas sincronizadas en orgs, "
           f"{stats['no_match']} sin contacto en ventana, {stats['error']} errores, "
           f"{deal_contacted} orgs con deal actualizadas")
     print(f"{'='*60}\n")
