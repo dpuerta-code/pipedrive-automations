@@ -1,0 +1,37 @@
+name: Lead Touch Numbering Backfill
+
+on:
+  schedule:
+    - cron: "0 0 * * *"    # Todos los dias 7pm Colombia (UTC-5 -> 00:00 UTC)
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "true = solo probar con 5 leads, false = correr todo"
+        required: true
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Lead Touch Numbering Backfill
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+        run: python lead_touch_numbering_backfill.py
+
+      - name: Guardar log de cambios
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-touch-numbering-result-log
+          path: lead_touch_numbering_result_log.json
+          if-no-files-found: ignore
