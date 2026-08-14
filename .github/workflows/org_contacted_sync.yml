@@ -7,7 +7,13 @@ on:
     - cron: "30 18 * * 1-5"  # Lunes-viernes 1:30pm Colombia (UTC-5 -> 18:30 UTC)
     - cron: "0 20 * * 1-5"   # Lunes-viernes 3:00pm Colombia (UTC-5 -> 20:00 UTC)
     - cron: "0 23 * * 1-5"   # Lunes-viernes 6:00pm Colombia (UTC-5 -> 23:00 UTC)
-  workflow_dispatch:         # permite correrlo manualmente desde GitHub
+    - cron: "0 13 * * 1"     # Lunes 8:00am Colombia (UTC-5 -> 13:00 UTC) — backfill semanal
+  workflow_dispatch:
+    inputs:
+      backfill_mode:
+        description: "BACKFILL_MODE: busca en historial completo de cada org pendiente (no solo 3 dias)"
+        required: false
+        default: "false"
 
 jobs:
   run:
@@ -25,4 +31,9 @@ jobs:
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
           TEST_MODE: "false"
+          BACKFILL_MODE: >-
+            ${{
+              (github.event_name == 'workflow_dispatch' && inputs.backfill_mode == 'true') ||
+              (github.event_name == 'schedule' && github.event.schedule == '0 13 * * 1')
+            }}
         run: python org_contacted_sync.py

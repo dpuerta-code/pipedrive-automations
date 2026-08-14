@@ -47,6 +47,12 @@ ORG_COUNT_ONE_OPTION = 1413   # "1"
 WINDOW_DAYS = 60       # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
 LOOKBACK_DAYS = 3       # cuantos dias hacia atras de actividad/prospeccion se revisan en cada corrida
 DEAL_LOOKBACK_DAYS = 2  # deals creados hace mas de N dias se ignoran en el Paso 3
+MAX_ACT_PAGES = 15      # tope de paginas al buscar actividades historicas de una org
+
+# BACKFILL_MODE: cuando es true, Paso 2 busca en todo el historial de la org
+# (no solo los ultimos 3 dias) para leads que llevan tiempo sin contacto detectado.
+# Se activa via env var o desde el workflow semanal.
+BACKFILL_MODE = os.environ.get("BACKFILL_MODE", "false").lower() == "true"
 
 CONTACT_ACTIVITY_TYPES = [
     "whatsapp",
@@ -221,10 +227,49 @@ def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
     return min(qualifying) if qualifying else None
 
 
-def clear_stale_org_contact_dates(recent_leads, org_cache):
-    """Para orgs con prospeccion reciente, si su First Contact Date quedo
-    vieja (de antes de este nuevo ciclo), la limpia."""
+def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
+    """Busca la actividad de contacto más temprana dentro de ±WINDOW_DAYS del prosp_date,
+    leyendo todo el historial de la org (hasta MAX_ACT_PAGES páginas).
+    Usado en reemplazos atómicos (Paso 1) y en backfill completo (Paso 2 BACKFILL_MODE)."""
+    candidates = []
+    act_start = 0
+    page = 0
+    try:
+        while page < MAX_ACT_PAGES:
+            ar = api_get(f"organizations/{org_id}/activities",
+                         {"done": 1, "limit": 100, "start": act_start})
+            page += 1
+            for a in (ar.get("data") or []):
+                if a.get("type") in CONTACT_ACTIVITY_TYPES:
+                    d = a.get("due_date") or (a.get("marked_as_done_time") or "")[:10]
+                    if d and len(d) >= 10:
+                        candidates.append(d[:10])
+            pag = ar.get("additional_data", {}).get("pagination", {})
+            if not pag.get("more_items_in_collection"):
+                break
+            act_start = pag.get("next_start", act_start + 100)
+    except Exception:
+        pass
+    if person_id:
+        if person_id not in person_cache:
+            try:
+                pr = api_get(f"persons/{person_id}")
+                person_cache[person_id] = pr.get("data") or {}
+            except Exception:
+                person_cache[person_id] = {}
+        mail_time = person_cache[person_id].get("last_outgoing_mail_time")
+        if mail_time:
+            candidates.append(mail_time[:10])
+    qualifying = [c for c in candidates if abs((to_date(c) - prosp_date).days) <= WINDOW_DAYS]
+    return min(qualifying) if qualifying else None
+
+
+def clear_stale_org_contact_dates(recent_leads, org_cache, person_cache):
+    """Para orgs re-prospectadas (gap ≥60d con el FCD actual), intenta un reemplazo
+    atómico: busca la nueva actividad qualifying ANTES de borrar el campo. Solo vacía
+    el campo si no encuentra nada todavía (evita el estado intermedio vacío)."""
     cleared = 0
+    replaced = 0
     seen_orgs = set()
     for lead in recent_leads:
         org_id = lead["organization_id"]
@@ -242,21 +287,37 @@ def clear_stale_org_contact_dates(recent_leads, org_cache):
 
         first_contact = org.get(ORG_FIRST_CONTACT_KEY)
         prosp = lead[PROSPECTION_DATE_KEY]
-        # Solo limpiar si el gap es >=60 días (nueva sesión real según regla de Metabase).
-        # Si el gap es <60 días, la nueva prospección es continuación de la misma sesión → no tocar.
-        if first_contact and (to_date(prosp) - to_date(first_contact)).days >= WINDOW_DAYS:
-            try:
+        if not first_contact or (to_date(prosp) - to_date(first_contact)).days < WINDOW_DAYS:
+            continue  # misma sesión o sin FCD → nada que hacer aquí
+
+        gap_days = (to_date(prosp) - to_date(first_contact)).days
+        org_name = org.get("name", str(org_id))
+
+        # Intento de reemplazo atómico: buscar nueva fecha antes de borrar
+        new_date = fetch_org_qualifying_contact(
+            org_id, to_date(prosp), lead.get("person_id"), person_cache
+        )
+        try:
+            if new_date:
+                api_put(f"organizations/{org_id}", {
+                    ORG_FIRST_CONTACT_KEY: new_date,
+                    ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ONE_OPTION,
+                })
+                org_cache[org_id][ORG_FIRST_CONTACT_KEY] = new_date
+                print(f"  Org {org_id} ('{org_name}'): FCD {first_contact} → {new_date} (nueva sesion, reemplazo atomico, {gap_days}d)")
+                replaced += 1
+            else:
+                # Sin actividad nueva todavía → borrar para que Paso 2 lo rellene cuando aparezca
                 api_put(f"organizations/{org_id}", {
                     ORG_FIRST_CONTACT_KEY: None,
                     ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ZERO_OPTION,
                 })
                 org_cache[org_id][ORG_FIRST_CONTACT_KEY] = None
-                gap_days = (to_date(prosp) - to_date(first_contact)).days
-                print(f"  Org {org_id} ('{org.get('name')}'): FCD limpiado (nueva sesion: {gap_days}d desde {first_contact})")
+                print(f"  Org {org_id} ('{org_name}'): FCD limpiado (nueva sesion {gap_days}d, sin contacto nuevo aun)")
                 cleared += 1
-            except Exception as e:
-                print(f"  ERROR limpiando org {org_id}: {e}")
-    return cleared
+        except Exception as e:
+            print(f"  ERROR en org {org_id}: {e}")
+    return cleared, replaced
 
 
 def propagate_to_org(org_id, contact_date, org_cache):
@@ -300,18 +361,22 @@ def main():
 
     active_leads = get_active_leads()
     print(f"Leads activos con Prospection Date: {len(active_leads)}")
+    if BACKFILL_MODE:
+        print("BACKFILL_MODE activo: Paso 2 buscará en todo el historial de la org")
 
     org_cache = {}
+    person_cache = {}
 
-    # Paso 1: limpiar First Contact Date de orgs re-prospectadas recientemente
+    # Paso 1: para orgs re-prospectadas recientemente (gap >=60d), reemplazar FCD atómicamente
+    # o limpiar si aún no hay contacto nuevo. No limpia si el gap es <60d (misma sesión).
     cutoff = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     recent_leads = [l for l in active_leads if l[PROSPECTION_DATE_KEY][:10] >= cutoff]
     print(f"Leads con prospeccion en los ultimos {LOOKBACK_DAYS} dias: {len(recent_leads)}")
     if TEST_MODE:
         recent_leads = recent_leads[:MAX_LEADS_TEST_MODE]
         print(f"TEST MODE: revisando limpieza solo en los primeros {len(recent_leads)}.")
-    cleared = clear_stale_org_contact_dates(recent_leads, org_cache)
-    print(f"Orgs con First Contact Date limpiado: {cleared}\n")
+    cleared, replaced = clear_stale_org_contact_dates(recent_leads, org_cache, person_cache)
+    print(f"Orgs con FCD reemplazado atomicamente: {replaced}, limpiado (sin contacto aun): {cleared}\n")
 
     # Paso 1.5: sincronizar FCD de org para leads que YA tienen contacto confirmado.
     # Cubre Causa #3: org atascada con FCD viejo porque no nació un lead nuevo que
@@ -348,10 +413,14 @@ def main():
         pending = pending[:MAX_LEADS_TEST_MODE]
         print(f"TEST MODE: procesando solo los primeros {len(pending)}.\n")
 
-    print(f"Buscando actividad de contacto de los ultimos {LOOKBACK_DAYS} dias...")
-    person_cache = {}
-    org_activity_dates = fetch_recent_activity_dates_by_org(person_cache)
-    print(f"Organizaciones con actividad reciente: {len(org_activity_dates)}\n")
+    if BACKFILL_MODE:
+        print(f"BACKFILL_MODE: buscando en historial completo de cada org pendiente...")
+        org_activity_dates = {}  # no se usa en backfill; cada lead consulta su org directamente
+    else:
+        print(f"Buscando actividad de contacto de los ultimos {LOOKBACK_DAYS} dias...")
+        org_activity_dates = fetch_recent_activity_dates_by_org(person_cache)
+        print(f"Organizaciones con actividad reciente: {len(org_activity_dates)}")
+    print()
 
     stats = {"updated": 0, "no_match": 0, "error": 0, "propagated_to_org": 0}
 
@@ -359,7 +428,12 @@ def main():
         lead_id = lead["id"]
         title = lead.get("title", "?")
         org_id = lead["organization_id"]
-        contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
+        if BACKFILL_MODE:
+            contact_date = fetch_org_qualifying_contact(
+                org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache
+            )
+        else:
+            contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
 
         if not contact_date:
             stats["no_match"] += 1
