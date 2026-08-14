@@ -4,7 +4,8 @@ Todos los dias a las 7am Colombia, para los leads activos (no archivados)
 cuyo owner sea Angie Rozo: si el lead NO tiene ninguna actividad futura
 agendada (due_date >= hoy, sin importar el tipo ni que tan lejos este),
 se le crea una actividad de tipo "Outbound Connection N" para que no se
-quede sin proximo paso.
+quede sin proximo paso. La actividad se asocia al lead, a la persona del
+lead, y a la organizacion del lead si tiene una.
 
 El numero N depende de que tan completos estan los "toques" ya marcados
 por lead_touch_numbering_backfill.py (subject con prefijo "Toque N - "):
@@ -178,18 +179,23 @@ def main():
         subject = f"Outbound Connection {target}"
 
         if TEST_MODE:
-            print(f"[{i}/{len(leads)}] '{title}': [TEST] crearia '{subject}' (type={activity_type}, due={today_str})")
+            print(f"[{i}/{len(leads)}] '{title}': [TEST] crearia '{subject}' (type={activity_type}, due={today_str}, "
+                  f"person_id={pid}, org_id={lead.get('organization_id')})")
             stats["created"] += 1
-            result_log.append({"lead_id": lead_id, "subject": subject, "type": activity_type, "due_date": today_str})
+            result_log.append({"lead_id": lead_id, "subject": subject, "type": activity_type, "due_date": today_str,
+                                "person_id": pid, "org_id": lead.get("organization_id")})
         else:
             payload = {
                 "subject": subject,
                 "type": activity_type,
                 "due_date": today_str,
                 "lead_id": lead_id,
+                "person_id": pid,
                 "user_id": OWNER_IDS[0] if len(OWNER_IDS) == 1 else lead.get("owner_id"),
                 "done": 0,
             }
+            if lead.get("organization_id"):
+                payload["org_id"] = lead["organization_id"]
             try:
                 resp = api_post("activities", payload)
                 if resp.get("success"):
