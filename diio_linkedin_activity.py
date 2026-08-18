@@ -23,8 +23,8 @@ BASE_URL = "https://slang.pipedrive.com/api/v1"
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 
-# Cubre la ventana entre las 2 corridas diarias
-LOOKBACK_HOURS = 14
+# Cubre el día completo (corrida única diaria)
+LOOKBACK_HOURS = 25
 
 DIIO_TRIGGER = "Mensajería instantánea"
 DIIO_MARKER  = "cargada por diio"
