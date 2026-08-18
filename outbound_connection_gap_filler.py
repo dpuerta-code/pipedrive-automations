@@ -115,6 +115,17 @@ def has_future_activity(lead_activities, today_str):
     return False
 
 
+def has_pending_outbound_connection(lead_activities):
+    """True si ya existe una actividad Outbound Connection creada por este
+    mismo script que sigue pendiente (no hecha), sin importar su due_date
+    -- evita crear una nueva encima de una que quedo vencida sin marcarse."""
+    for a in lead_activities:
+        t = a.get("type") or ""
+        if t.startswith("outbound_connection_") and not a.get("done"):
+            return True
+    return False
+
+
 def next_touch_target(lead_activities):
     aircall_touches, whatsapp_touches = set(), set()
     for a in lead_activities:
@@ -151,7 +162,8 @@ def main():
     if TEST_MODE:
         leads = leads[:MAX_LEADS_TEST_MODE]
 
-    stats = {"created": 0, "skipped_future_activity": 0, "skipped_all_touches_complete": 0, "error": 0}
+    stats = {"created": 0, "skipped_future_activity": 0, "skipped_pending_code_activity": 0,
+              "skipped_all_touches_complete": 0, "error": 0}
     result_log = []
     activities_cache = {}
 
@@ -167,6 +179,11 @@ def main():
 
         if has_future_activity(lead_activities, today_str):
             stats["skipped_future_activity"] += 1
+            continue
+
+        if has_pending_outbound_connection(lead_activities):
+            print(f"[{i}/{len(leads)}] '{title}': ya tiene una Outbound Connection pendiente sin marcar, no se crea otra.")
+            stats["skipped_pending_code_activity"] += 1
             continue
 
         target = next_touch_target(lead_activities)
@@ -215,6 +232,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Resumen: {stats['created']} creadas, {stats['skipped_future_activity']} ya tenian actividad futura, "
+          f"{stats['skipped_pending_code_activity']} ya tenian Outbound Connection pendiente, "
           f"{stats['skipped_all_touches_complete']} con toques 1-3 completos, {stats['error']} errores")
     print(f"{'='*60}\n")
 
