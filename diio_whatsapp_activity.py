@@ -8,7 +8,11 @@ de tipo whatsapp marcada como hecha, asignada al rep del deal/lead.
 
 TEST_MODE=true  → solo lectura, no ejecuta cambios.
 Cron: 12pm y 7pm Colombia (17:00 y 00:00 UTC).
-Duplicados: una actividad por nota por día (misma nota actualizada el mismo día = skip).
+Duplicados: maximo 1 actividad por persona por dia. find_existing_whatsapp_activity
+busca por person_id (ademas de deal_id/lead_id) porque el 99%+ de las notas de
+Diio solo traen person_id -- sin esa busqueda, cada corrida del cron que volvia
+a ver la misma nota dentro de la ventana de LOOKBACK_HOURS creaba una actividad
+nueva en vez de encontrar la ya creada.
 """
 
 import os
@@ -104,11 +108,18 @@ def get_notes_in_window(since_date_str, until_date_str):
     return notes
 
 
-def find_existing_whatsapp_activity(deal_id, lead_id, due_date):
+def find_existing_whatsapp_activity(deal_id, lead_id, person_id, due_date):
     """
-    Busca cualquier actividad de tipo whatsapp para este deal/lead en esta fecha.
-    Retorna la actividad encontrada (dict) o None.
+    Busca cualquier actividad de tipo whatsapp para este deal/lead/persona en
+    esta fecha. Retorna la actividad encontrada (dict) o None.
     Prioridad: si ya existe 'Whatsapp Message Diio', la retorna primero.
+
+    NOTA: la busqueda por lead_id via /v1/activities esta ahi por compatibilidad
+    pero ese endpoint generico solo devuelve actividades del dueno del token
+    (bug conocido de la API), asi que no es confiable. El 99%+ de las notas de
+    Diio traen person_id, y /v1/persons/{id}/activities si devuelve datos
+    completos de toda la compania -- por eso esa es la busqueda que realmente
+    evita los duplicados.
     """
     candidates = []
 
@@ -137,6 +148,23 @@ def find_existing_whatsapp_activity(deal_id, lead_id, due_date):
             for act in (resp.get("data") or []):
                 if act.get("type") == ACTIVITY_TYPE:
                     candidates.append(act)
+        except Exception:
+            pass
+
+    if person_id:
+        try:
+            start = 0
+            while True:
+                resp = api_get(f"persons/{person_id}/activities", {"start": start, "limit": 500})
+                data = resp.get("data") or []
+                for act in data:
+                    if act.get("type") == ACTIVITY_TYPE and act.get("due_date") == due_date:
+                        candidates.append(act)
+                pagination = resp.get("additional_data", {}).get("pagination", {})
+                if pagination.get("more_items_in_collection"):
+                    start = pagination["next_start"]
+                else:
+                    break
         except Exception:
             pass
 
@@ -212,7 +240,7 @@ def main():
 
         print(f"Nota {note_id} | {entity} | rep: {user_name} | fecha: {note_date}")
 
-        existing = find_existing_whatsapp_activity(deal_id, lead_id, note_date)
+        existing = find_existing_whatsapp_activity(deal_id, lead_id, person_id, note_date)
 
         if existing:
             existing_subject = existing.get("subject", "")
