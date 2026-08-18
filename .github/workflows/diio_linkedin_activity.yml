@@ -1,0 +1,32 @@
+name: Diio LinkedIn Activity Sync
+
+on:
+  schedule:
+    - cron: "0 17 * * *"   # 12pm Colombia (UTC-5 → 17:00 UTC)
+    - cron: "0 20 * * *"   # 3pm Colombia (UTC-5 → 20:00 UTC)
+    - cron: "0 0 * * *"    # 7pm Colombia (UTC-5 → 00:00 UTC)
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE: true = solo lectura, false = ejecuta cambios"
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Diio LinkedIn Activity Sync
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+        run: python diio_linkedin_activity.py
