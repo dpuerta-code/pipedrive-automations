@@ -30,7 +30,7 @@ PD_BASE   = "https://slang.pipedrive.com/api/v1"
 # ── ClickHouse ─────────────────────────────────────────────────────────────
 CH_HOST   = os.environ.get("CLICKHOUSE_HOST", "sql-clickhouse.clickhouse.com")
 CH_PORT   = os.environ.get("CLICKHOUSE_PORT", "8443")
-CH_USER   = os.environ.get("CLICKHOUSE_USER", "demo")
+CH_USER   = os.environ.get("CLICKHOUSE_USER", "s_puerta")
 CH_PASS   = os.environ.get("CLICKHOUSE_PASSWORD", "")
 CH_BASE   = f"https://{CH_HOST}:{CH_PORT}/"
 
