@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Todos los dias a las 7am Colombia, para los leads activos (no archivados)
-cuyo owner sea Angie Rozo: si el lead NO tiene ninguna actividad futura
-agendada (due_date >= hoy, sin importar el tipo ni que tan lejos este),
-se le crea una actividad de tipo "Outbound Connection N" para que no se
-quede sin proximo paso. La actividad se asocia al lead, a la persona del
-lead, y a la organizacion del lead si tiene una.
+Todos los dias a las 7am Colombia, para TODOS los leads activos (no
+archivados) de cualquier BDR: si el lead NO tiene ninguna actividad
+pendiente (sin marcar como hecha, sin importar el tipo -- Outbound
+Connection, llamada, whatsapp, task, lo que sea -- ni su due_date), se le
+crea una actividad de tipo "Outbound Connection N" para que no se quede
+sin proximo paso. La actividad se asocia al lead, a la persona del lead,
+y a la organizacion del lead si tiene una, y queda asignada al owner del
+lead.
 
 El numero N depende de que tan completos estan los "toques" ya marcados
 por lead_touch_numbering_backfill.py (subject con prefijo "Toque N - "):
@@ -14,9 +16,6 @@ actividad de aircall Y una de whatsapp marcadas "Toque N -". Se busca el
 primer N (empezando en 1) que no este completo todavia; ese es el N de la
 nueva actividad. Si los toques 1, 2 y 3 ya estan completos, no se crea
 nada (no existe un tipo "Outbound Connection 4").
-
-Alcance: por ahora solo Angie Rozo (owner_id 22793685). Si se quiere
-extender a mas BDRs, agregar sus ids a OWNER_IDS.
 
 TEST_MODE=true -> solo calcula y muestra que crearia, no escribe nada.
 Cron: todos los dias 7am Colombia (UTC-5 -> 12:00 UTC).
@@ -31,8 +30,6 @@ from datetime import date
 
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
-
-OWNER_IDS = [22793685]  # Angie Rozo
 
 OUTBOUND_TYPE_BY_TOUCH = {1: "outbound_connection_1", 2: "outbound_connection_2", 3: "outbound_connection_3"}
 MAX_TOUCH = 3
@@ -75,19 +72,17 @@ def api_post(endpoint, data):
     return r.json()
 
 
-def get_active_leads_for_owners():
-    leads = []
-    for owner_id in OWNER_IDS:
-        start = 0
-        while True:
-            resp = api_get("leads", {"owner_id": owner_id, "start": start, "limit": 500})
-            data = resp.get("data") or []
-            leads.extend(data)
-            pagination = resp.get("additional_data", {}).get("pagination", {})
-            if pagination.get("more_items_in_collection"):
-                start = pagination["next_start"]
-            else:
-                break
+def get_active_leads():
+    leads, start = [], 0
+    while True:
+        resp = api_get("leads", {"start": start, "limit": 500})
+        data = resp.get("data") or []
+        leads.extend(data)
+        pagination = resp.get("additional_data", {}).get("pagination", {})
+        if pagination.get("more_items_in_collection"):
+            start = pagination["next_start"]
+        else:
+            break
     return [l for l in leads if l.get("person_id")]
 
 
@@ -105,25 +100,12 @@ def get_person_activities(person_id):
     return items
 
 
-def has_future_activity(lead_activities, today_str):
-    for a in lead_activities:
-        if a.get("done"):
-            continue
-        due = a.get("due_date")
-        if due and due >= today_str:
-            return True
-    return False
-
-
-def has_pending_outbound_connection(lead_activities):
-    """True si ya existe una actividad Outbound Connection creada por este
-    mismo script que sigue pendiente (no hecha), sin importar su due_date
-    -- evita crear una nueva encima de una que quedo vencida sin marcarse."""
-    for a in lead_activities:
-        t = a.get("type") or ""
-        if t.startswith("outbound_connection_") and not a.get("done"):
-            return True
-    return False
+def has_any_pending_activity(lead_activities):
+    """True si el lead tiene CUALQUIER actividad sin marcar como hecha,
+    sin importar el tipo (Outbound Connection, llamada, whatsapp, task...)
+    ni el due_date (pasado, hoy o futuro) -- si ya hay algo pendiente para
+    este lead, no hace falta crear otra cosa."""
+    return any(not a.get("done") for a in lead_activities)
 
 
 def next_touch_target(lead_activities):
@@ -156,13 +138,13 @@ def main():
         print(f"MODO TEST: solo se procesaran los primeros {MAX_LEADS_TEST_MODE} leads")
     print(f"{'='*60}\n")
 
-    leads = get_active_leads_for_owners()
-    print(f"Leads activos de los owners configurados: {len(leads)}")
+    leads = get_active_leads()
+    print(f"Leads activos: {len(leads)}")
 
     if TEST_MODE:
         leads = leads[:MAX_LEADS_TEST_MODE]
 
-    stats = {"created": 0, "skipped_future_activity": 0, "skipped_pending_code_activity": 0,
+    stats = {"created": 0, "skipped_pending_activity": 0,
               "skipped_all_touches_complete": 0, "error": 0}
     result_log = []
     activities_cache = {}
@@ -177,13 +159,9 @@ def main():
         acts = activities_cache[pid]
         lead_activities = [a for a in acts if a.get("lead_id") == lead_id]
 
-        if has_future_activity(lead_activities, today_str):
-            stats["skipped_future_activity"] += 1
-            continue
-
-        if has_pending_outbound_connection(lead_activities):
-            print(f"[{i}/{len(leads)}] '{title}': ya tiene una Outbound Connection pendiente sin marcar, no se crea otra.")
-            stats["skipped_pending_code_activity"] += 1
+        if has_any_pending_activity(lead_activities):
+            print(f"[{i}/{len(leads)}] '{title}': ya tiene una actividad pendiente sin marcar, no se crea otra.")
+            stats["skipped_pending_activity"] += 1
             continue
 
         target = next_touch_target(lead_activities)
@@ -208,7 +186,7 @@ def main():
                 "due_date": today_str,
                 "lead_id": lead_id,
                 "person_id": pid,
-                "user_id": OWNER_IDS[0] if len(OWNER_IDS) == 1 else lead.get("owner_id"),
+                "user_id": lead.get("owner_id"),
                 "done": 0,
             }
             if lead.get("organization_id"):
@@ -231,8 +209,7 @@ def main():
         json.dump(result_log, f)
 
     print(f"\n{'='*60}")
-    print(f"Resumen: {stats['created']} creadas, {stats['skipped_future_activity']} ya tenian actividad futura, "
-          f"{stats['skipped_pending_code_activity']} ya tenian Outbound Connection pendiente, "
+    print(f"Resumen: {stats['created']} creadas, {stats['skipped_pending_activity']} ya tenian actividad pendiente, "
           f"{stats['skipped_all_touches_complete']} con toques 1-3 completos, {stats['error']} errores")
     print(f"{'='*60}\n")
 
