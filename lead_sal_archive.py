@@ -24,6 +24,9 @@ SAL_DATE_KEY = "8a4d1715b308943f49d7e5b270a7ea81d6f356b2"
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 # BACKFILL_MODE=true → ignora la fecha y procesa todos los deals open con SAL date lleno
 BACKFILL_MODE = os.environ.get("BACKFILL_MODE", "false").lower() == "true"
+# SAL_LOOKBACK_DAYS: ventana de días hacia atrás para detectar SAL dates retroactivos
+# Default 2 = hoy + ayer, para cubrir el caso de deals creados con SAL date del día anterior
+SAL_LOOKBACK_DAYS = int(os.environ.get("SAL_LOOKBACK_DAYS", "2"))
 
 request_count = 0
 window_start = time.time()
@@ -73,11 +76,11 @@ def api_delete(endpoint):
     return r.json()
 
 
-def get_deals_with_sal_date(today_str=None):
+def get_deals_with_sal_date(valid_dates=None):
     """
     Pagina todos los deals open con SAL date.
-    Si today_str es None (BACKFILL_MODE), devuelve todos los que tengan SAL date lleno.
-    Si today_str esta definido, filtra solo los de hoy.
+    valid_dates=None (BACKFILL_MODE) → devuelve todos los que tengan SAL date lleno.
+    valid_dates=set de strings YYYY-MM-DD → filtra los que caigan en ese conjunto.
     """
     deals = []
     start = 0
@@ -94,7 +97,7 @@ def get_deals_with_sal_date(today_str=None):
             sal_date = deal.get(SAL_DATE_KEY)
             if not sal_date:
                 continue
-            if today_str is None or str(sal_date)[:10] == today_str:
+            if valid_dates is None or str(sal_date)[:10] in valid_dates:
                 deals.append(deal)
         pagination = resp.get("additional_data", {}).get("pagination", {})
         if pagination.get("more_items_in_collection"):
@@ -221,7 +224,7 @@ def process_org(org_id, org_name):
 
 def main():
     colombia_now = datetime.now(timezone.utc) - timedelta(hours=5)
-    today_str = colombia_now.strftime("%Y-%m-%d")
+    today = colombia_now.date()
 
     print(f"\n{'='*60}")
     print(f"Lead SAL Archive -- {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -230,12 +233,16 @@ def main():
     if BACKFILL_MODE:
         print("BACKFILL MODE: procesando TODOS los deals open con SAL date lleno")
     else:
-        print(f"Buscando deals con SAL date = {today_str} (hora Colombia)")
+        valid_dates = {
+            (today - timedelta(days=i)).isoformat()
+            for i in range(SAL_LOOKBACK_DAYS)
+        }
+        print(f"Buscando deals con SAL date en los últimos {SAL_LOOKBACK_DAYS} días: {sorted(valid_dates)}")
     print(f"{'='*60}\n")
 
-    deals = get_deals_with_sal_date(None if BACKFILL_MODE else today_str)
+    deals = get_deals_with_sal_date(None if BACKFILL_MODE else valid_dates)
 
-    label = "todos con SAL date" if BACKFILL_MODE else "con SAL date hoy"
+    label = "todos con SAL date" if BACKFILL_MODE else f"con SAL date en últimos {SAL_LOOKBACK_DAYS} días"
     print(f"Deals {label}: {len(deals)}\n")
 
     if not deals:
