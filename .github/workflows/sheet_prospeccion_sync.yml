@@ -1,0 +1,34 @@
+name: Sheet Prospeccion Sync
+
+on:
+  schedule:
+    - cron: "0 14 */2 * *"   # Cada 2 dias, 9:00am Colombia (UTC-5 -> 14:00 UTC)
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE: true = solo lectura, false = ejecuta cambios"
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install clickhouse-connect
+
+      - name: Ejecutar Sheet Prospeccion Sync
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_SECURE: ${{ secrets.CLICKHOUSE_SECURE }}
+          TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+        run: python sheet_prospeccion_sync.py
