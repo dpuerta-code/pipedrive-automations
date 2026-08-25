@@ -181,6 +181,10 @@ def process_org(org_id, org_name):
             for act in activities:
                 act_id = act["id"]
                 act_subject = act.get("subject", "?")
+                act_type = act.get("type", "")
+                if act_type == "retomar":
+                    print(f"      SKIP tarea {act_id} '{act_subject}' (tipo retomar)")
+                    continue
                 if TEST_MODE:
                     print(f"      [TEST] Eliminaria tarea {act_id} '{act_subject}'")
                     deleted += 1
