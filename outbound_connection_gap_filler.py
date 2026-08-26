@@ -31,6 +31,8 @@ from datetime import date
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
 
+EXCLUDED_OWNER_IDS = {25168321}  # Valentina Martin Clavijo -- automatizacion pausada para ella
+
 OUTBOUND_TYPE_BY_TOUCH = {1: "outbound_connection_1", 2: "outbound_connection_2", 3: "outbound_connection_3"}
 MAX_TOUCH = 3
 
@@ -83,7 +85,7 @@ def get_active_leads():
             start = pagination["next_start"]
         else:
             break
-    return [l for l in leads if l.get("person_id")]
+    return [l for l in leads if l.get("person_id") and l.get("owner_id") not in EXCLUDED_OWNER_IDS]
 
 
 def get_person_activities(person_id):
