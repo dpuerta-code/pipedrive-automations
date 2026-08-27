@@ -9,7 +9,10 @@ on:
     # GitHub respeta de forma consistente -- el loop de abajo repite la
     # asignacion cada 5 min DENTRO de cada disparo de 15 min para no perder
     # velocidad de respuesta.
-    - cron: "*/15 * * * *"
+    # Horario laboral Colombia (UTC-5), 8:00am-5:30pm -> 13:00-22:30 UTC.
+    # Colombia no tiene horario de verano, el offset es fijo todo el año.
+    - cron: "*/15 13-21 * * *"   # 8:00am-4:45pm Colombia (13:00-21:45 UTC)
+    - cron: "0,15,30 22 * * *"   # 5:00pm, 5:15pm, 5:30pm Colombia (22:00-22:30 UTC)
   workflow_dispatch:
     inputs:
       test_mode:
