@@ -1,0 +1,37 @@
+name: CM Schedule Auto Assign
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # Cada 5 minutos
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "true = solo probar con 5 deals, false = correr todo"
+        required: true
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar CM Schedule Auto Assign
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+        run: python cm_schedule_assign.py
+
+      - name: Guardar log de cambios
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cm-schedule-assign-result-log
+          path: cm_schedule_assign_result_log.json
+          if-no-files-found: ignore
