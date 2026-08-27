@@ -40,6 +40,11 @@ rotacion pura por orden de creacion. Esta excepcion tiene prioridad
 sobre la de continuidad (excepcion 3): un deal organic/google siempre
 usa esta rotacion fija, incluso si su organizacion tendria continuidad.
 
+PAUSADA (ver ORGANIC_GOOGLE_ROTATION_ENABLED): mientras este flag sea
+False, los deals de canal organic/google NO se autoasignan por ninguna
+via -- se saltan y quedan pendientes para asignacion manual. Al
+reactivar, debe reiniciar en Manoella (primera de la lista).
+
 Excepcion 3 (continuidad de cuenta): si la organizacion del deal tiene
 un deal Lost de hace menos de 6 meses cuya ultima etapa fue "Opp" o una
 etapa posterior en su pipeline (o sea, llego a ser una oportunidad real
@@ -75,6 +80,14 @@ CHANNEL_GOOGLE = 283
 CHANNEL_ORGANIC = 285
 EXCLUDED_ROTATION_CHANNELS = {CHANNEL_GOOGLE, CHANNEL_ORGANIC}
 CHANNEL_NAMES = {CHANNEL_GOOGLE: "google", CHANNEL_ORGANIC: "organic"}
+
+# PAUSADO 2026-08-27 a pedido del usuario: mientras esto sea False, los deals
+# de canal organic/google se SALTAN por completo (no se autoasignan por
+# ninguna via) y quedan pendientes para asignacion manual, igual que el deal
+# 26468 Pluscargo. Cuando el usuario confirme que se reactive, la rotacion
+# debe REINICIAR en Manoella (primera de la lista), sin importar el ultimo
+# asignado historico en el filtro 71381 -- no basta con volver esto a True.
+ORGANIC_GOOGLE_ROTATION_ENABLED = False
 
 # Orden fijo pedido por el usuario para deals de canal organic/google -- NO
 # pasa por el balanceo de carga ni por disponibilidad, es un round robin
@@ -346,6 +359,7 @@ def main():
         "assigned_self_bdr": 0,
         "assigned_organic_google": 0,
         "assigned_continuity": 0,
+        "skipped_organic_google_paused": 0,
         "error": 0,
     }
     result_log = []
@@ -364,6 +378,10 @@ def main():
             chosen_cm = bdr_id
             reason = "BDR es del Grupo SE, se autoasigna"
             counts_toward_load = False
+        elif channel in EXCLUDED_ROTATION_CHANNELS and not ORGANIC_GOOGLE_ROTATION_ENABLED:
+            print(f"[{i}/{len(pending)}] '{title}' (deal {deal_id}): SALTADO -- rotacion organic/google pausada, queda pendiente de asignacion manual")
+            stats["skipped_organic_google_paused"] += 1
+            continue
         elif channel in EXCLUDED_ROTATION_CHANNELS:
             is_organic_google = True
             if organic_google_last_cm == "unfetched":
@@ -427,6 +445,7 @@ def main():
         f"Resumen: {stats['assigned']} asignados "
         f"({stats['assigned_self_bdr']} por BDR propio, {stats['assigned_organic_google']} por rotacion organic/google, "
         f"{stats['assigned_continuity']} por continuidad), "
+        f"{stats['skipped_organic_google_paused']} saltados (rotacion organic/google pausada), "
         f"{stats['error']} errores"
     )
     print(f"{'='*60}\n")
