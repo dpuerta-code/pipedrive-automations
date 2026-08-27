@@ -2,7 +2,17 @@ name: CM Schedule Auto Assign
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # Cada 5 minutos
+    # GitHub descarta de forma poco confiable los cron mas frecuentes que
+    # ~15 min (confirmado 2026-08-27: 0 de ~65 disparos esperados en 5h20min
+    # con "*/5 * * * *", mientras otros workflows del mismo repo con cron
+    # diario si disparaban solos). "*/15 * * * *" es el intervalo minimo que
+    # GitHub respeta de forma consistente -- el loop de abajo repite la
+    # asignacion cada 5 min DENTRO de cada disparo de 15 min para no perder
+    # velocidad de respuesta.
+    # Horario laboral Colombia (UTC-5), 8:00am-5:30pm -> 13:00-22:30 UTC.
+    # Colombia no tiene horario de verano, el offset es fijo todo el año.
+    - cron: "*/15 13-21 * * *"   # 8:00am-4:45pm Colombia (13:00-21:45 UTC)
+    - cron: "0,15,30 22 * * *"   # 5:00pm, 5:15pm, 5:30pm Colombia (22:00-22:30 UTC)
   workflow_dispatch:
     inputs:
       test_mode:
@@ -22,16 +32,24 @@ jobs:
 
       - run: pip install requests
 
-      - name: Ejecutar CM Schedule Auto Assign
+      - name: Ejecutar CM Schedule Auto Assign (3x, cada 5 min)
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
           TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
-        run: python cm_schedule_assign.py
+        run: |
+          for i in 1 2 3; do
+            echo "=== Corrida interna $i/3 ==="
+            python cm_schedule_assign.py
+            mv cm_schedule_assign_result_log.json "cm_schedule_assign_result_log_${i}.json" 2>/dev/null || true
+            if [ "$i" -lt 3 ]; then
+              sleep 300
+            fi
+          done
 
       - name: Guardar log de cambios
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cm-schedule-assign-result-log
-          path: cm_schedule_assign_result_log.json
+          path: cm_schedule_assign_result_log_*.json
           if-no-files-found: ignore
