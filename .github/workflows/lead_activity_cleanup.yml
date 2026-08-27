@@ -1,0 +1,35 @@
+name: Lead Activity Cleanup
+
+on:
+  schedule:
+    - cron: "30 0 * * *"   # 7:30pm Colombia (UTC-5 → 00:30 UTC) — después del lead_sal_archive
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE: true = solo lectura, false = elimina actividades"
+        required: false
+        default: "true"
+      lookback_days:
+        description: "LOOKBACK_DAYS: cuántos días atrás buscar leads archivados (default 7)"
+        required: false
+        default: "7"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Lead Activity Cleanup
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          TEST_MODE:     ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+          LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '7' }}
+        run: python lead_activity_cleanup.py
