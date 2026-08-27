@@ -14,14 +14,26 @@ El pool de CMs es fijo, el Grupo SE (ver CM_POOL). La asignacion es por
 balanceo de carga con round-robin ponderado suave (smooth weighted
 round-robin, igual al que usan balanceadores como nginx): se cuenta
 cuantos deals tiene cada CM en "CM SE" dentro del filtro 71373 ("CM
-Load - Last 30 Days", deals con "Comm. Meeting attended date" en el
-ultimo mes) y cada CM entra a la rotacion con un peso proporcional a
-cuanto le falta para nivelarse con el que mas carga tiene. A diferencia
-de un "siempre el de menor carga" puro, esto evita que una sola persona
-se lleve varias asignaciones seguidas dentro de la misma corrida solo
-por estar mas atras -- los turnos se reparten entre varios CMs mientras
+Load - Last 30 Days", deals con "CM scheduled on" en el ultimo mes --
+se actualiza casi al instante, no espera a que la reunion se atienda)
+y cada CM entra a la rotacion con un peso proporcional a cuanto le
+falta para nivelarse con el que mas carga tiene. A diferencia de un
+"siempre el de menor carga" puro, esto evita que una sola persona se
+lleve varias asignaciones seguidas dentro de la misma corrida solo por
+estar mas atras -- los turnos se reparten entre varios CMs mientras
 sigue convergiendo a nivelar la carga. La carga y los acumuladores se
 actualizan en memoria despues de cada asignacion.
+
+Como en la practica casi siempre hay 1 solo deal pendiente por corrida
+(el cron corre cada 5 min), el "suavizado" de arriba por si solo no
+alcanza a evitar que el mismo CM se lleve varias asignaciones reales
+seguidas en corridas separadas -- simplemente gana siempre el que tenga
+menos carga en ese momento. Para evitar esto, `pick_next_cm` recibe
+ademas el ultimo CM asignado por balanceo/continuidad (ver
+`get_last_assigned_cm`, calculado en vivo desde el mismo filtro 71373)
+y lo excluye de poder ganar la ronda inmediatamente siguiente, aunque
+siga siendo el de menor carga -- sigue sumando peso normalmente, asi
+que si continua atras gana la ronda de despues sin exclusion.
 
 Excepcion 1 (BDR es del Grupo SE): si el BDR del deal es uno de los
 mismos CMs del Grupo SE, el deal se asigna a si mismo como CM SE (no
@@ -280,22 +292,55 @@ def build_load_map():
         cm_id = cm_user_id(d)
         if cm_id in CM_POOL:
             load[cm_id] += 1
-    return load
+    return load, deals
 
 
-def pick_next_cm(load, current):
+def get_last_assigned_cm(load_deals):
+    """Entre los mismos deals que cuentan para la carga (excluye
+    autoasignados BDR=SE), busca el mas reciente por 'CM scheduled on' y
+    devuelve su CM SE. Se usa para no repetirle la siguiente asignacion de
+    balanceo a la misma persona apenas recibio una -- sin esto, cuando solo
+    hay 1 deal pendiente por corrida (el caso normal, ya que el cron corre
+    cada 5 min), el "suavizado" del round-robin nunca entra en juego y el
+    de menor carga se lleva varias seguidas hasta emparejarse con los
+    demas, que es justo lo que el round-robin ponderado deberia evitar."""
+    candidates = []
+    for d in load_deals:
+        if bdr_user_id(d) in CM_POOL:
+            continue
+        cm_id = cm_user_id(d)
+        if cm_id not in CM_POOL:
+            continue
+        scheduled = cm_scheduled_on(d)
+        if not scheduled:
+            continue
+        candidates.append((scheduled, d.get("update_time") or "", cm_id))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+def pick_next_cm(load, current, exclude=None):
     """Smooth weighted round-robin: cada CM suma, en cada turno, un peso
     igual a (carga_maxima - su_carga + 1) -- mientras mas atras esta, mas
     peso acumula por turno. Se elige quien tenga el acumulador mas alto y
     se le resta el total de pesos, lo que lo "enfria" para los proximos
     turnos. Esto reparte las asignaciones entre varios CMs en vez de
     dárselas todas seguidas al que esta mas atras, sin dejar de converger
-    a una carga nivelada."""
+    a una carga nivelada.
+
+    `exclude` (opcional): un CM que no puede ganar esta ronda aunque tenga
+    el acumulador mas alto -- se usa para no repetir al ultimo asignado en
+    la ronda inmediatamente anterior. Igual sigue sumando peso normal, asi
+    que si vuelve a estar mas atras que los demas, gana la siguiente ronda
+    ya sin exclusion."""
     max_load = max(load.values())
     weights = {cm_id: (max_load - load[cm_id]) + 1 for cm_id in load}
     for cm_id, w in weights.items():
         current[cm_id] += w
-    selected = max(current, key=lambda cm_id: (current[cm_id], -load[cm_id]))
+    candidates = [cm_id for cm_id in load if cm_id != exclude] or list(load.keys())
+    selected = max(candidates, key=lambda cm_id: (current[cm_id], -load[cm_id]))
     current[selected] -= sum(weights.values())
     return selected
 
@@ -337,10 +382,13 @@ def main():
         print(f"MODO TEST: solo se procesaran los primeros {MAX_TEST_MODE} deals pendientes")
     print(f"{'='*60}\n")
 
-    load = build_load_map()
+    load, load_deals = build_load_map()
     print("Carga actual del Grupo SE (ultimos 30 dias):")
     for cm_id, count in load.most_common():
         print(f"  {CM_POOL[cm_id]} ({cm_id}): {count} deals")
+
+    last_assigned_cm = get_last_assigned_cm(load_deals)
+    print(f"Ultimo CM asignado por balanceo/continuidad: {CM_POOL.get(last_assigned_cm, last_assigned_cm)}")
 
     pending = get_pending_deals_today()
     print(f"\nDeals pendientes de asignar (CM scheduled on = hoy): {len(pending)}")
@@ -396,9 +444,10 @@ def main():
                 chosen_cm = continuity_cm
                 reason = "continuidad (deal Lost reciente en Opp+)"
             else:
-                chosen_cm = pick_next_cm(load, current)
-                reason = "balanceo (round-robin ponderado)"
+                chosen_cm = pick_next_cm(load, current, exclude=last_assigned_cm)
+                reason = "balanceo (round-robin ponderado, sin repetir al ultimo asignado)"
             counts_toward_load = True
+            last_assigned_cm = chosen_cm  # avanza el puntero para el resto de esta corrida
 
         cm_name = CM_POOL.get(chosen_cm, f"user {chosen_cm}")
 
