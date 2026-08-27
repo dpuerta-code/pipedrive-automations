@@ -52,10 +52,12 @@ rotacion pura por orden de creacion. Esta excepcion tiene prioridad
 sobre la de continuidad (excepcion 3): un deal organic/google siempre
 usa esta rotacion fija, incluso si su organizacion tendria continuidad.
 
-PAUSADA (ver ORGANIC_GOOGLE_ROTATION_ENABLED): mientras este flag sea
-False, los deals de canal organic/google NO se autoasignan por ninguna
-via -- se saltan y quedan pendientes para asignacion manual. Al
-reactivar, debe reiniciar en Manoella (primera de la lista).
+Se puede pausar por completo con ORGANIC_GOOGLE_ROTATION_ENABLED=False --
+mientras este flag sea False, los deals de canal organic/google NO se
+autoasignan por ninguna via, se saltan y quedan pendientes para
+asignacion manual. Reactivada 2026-08-27; ver
+ORGANIC_GOOGLE_ROTATION_RESET_AT para como se reinicio limpio en
+Manoella sin perder la continuidad de la rotacion hacia adelante.
 
 Excepcion 3 (continuidad de cuenta): si la organizacion del deal tiene
 un deal Lost de hace menos de 6 meses cuya ultima etapa fue "Opp" o una
@@ -93,13 +95,23 @@ CHANNEL_ORGANIC = 285
 EXCLUDED_ROTATION_CHANNELS = {CHANNEL_GOOGLE, CHANNEL_ORGANIC}
 CHANNEL_NAMES = {CHANNEL_GOOGLE: "google", CHANNEL_ORGANIC: "organic"}
 
-# PAUSADO 2026-08-27 a pedido del usuario: mientras esto sea False, los deals
-# de canal organic/google se SALTAN por completo (no se autoasignan por
-# ninguna via) y quedan pendientes para asignacion manual, igual que el deal
-# 26468 Pluscargo. Cuando el usuario confirme que se reactive, la rotacion
-# debe REINICIAR en Manoella (primera de la lista), sin importar el ultimo
-# asignado historico en el filtro 71381 -- no basta con volver esto a True.
-ORGANIC_GOOGLE_ROTATION_ENABLED = False
+# REACTIVADO 2026-08-27 21:01 UTC a pedido del usuario (estuvo pausado desde
+# las 20:25 UTC del mismo dia -- ver PR #33). Mientras esto sea False, los
+# deals de canal organic/google se saltan por completo y quedan pendientes
+# para asignacion manual.
+ORGANIC_GOOGLE_ROTATION_ENABLED = True
+
+# El usuario pidio que la rotacion arranque limpia en Manoella al
+# reactivarse, sin importar el historial real en el filtro 71381 (que a
+# esta fecha mostraria a Daniel como ultimo, de una asignacion manual de
+# cierre hecha por fuera del script para el deal 26473). En vez de un
+# override que hay que recordar quitar despues, get_last_organic_google_cm
+# ignora cualquier deal de este canal creado ANTES de este timestamp -- el
+# primer deal que aparezca despues de esto no encuentra historial "valido"
+# y le toca a Manoella (primera de ORGANIC_GOOGLE_ROTATION); de ahi en
+# adelante la rotacion sigue normal para siempre, no hace falta tocar esto
+# de nuevo.
+ORGANIC_GOOGLE_ROTATION_RESET_AT = "2026-08-27T21:01:52Z"
 
 # Orden fijo pedido por el usuario para deals de canal organic/google -- NO
 # pasa por el balanceo de carga ni por disponibilidad, es un round robin
@@ -240,13 +252,17 @@ def deal_channel(deal):
 
 def get_last_organic_google_cm():
     """Busca el deal mas reciente (por fecha de creacion) de canal
-    organic/google que ya tiene CM SE asignado. Devuelve su CM SE, o None
-    si no hay ninguno todavia (primera vez que corre esta regla)."""
-    resp = api_get("deals", {"filter_id": ORGANIC_GOOGLE_FILTER_ID, "sort": "add_time DESC", "limit": 1})
+    organic/google que ya tiene CM SE asignado Y que fue creado despues de
+    ORGANIC_GOOGLE_ROTATION_RESET_AT. Devuelve su CM SE, o None si no hay
+    ninguno todavia -- ya sea porque es la primera vez que corre esta regla,
+    o porque estamos justo despues de un reinicio y todo el historial previo
+    quedo descartado a proposito (ver comentario en ORGANIC_GOOGLE_ROTATION_RESET_AT)."""
+    resp = api_get("deals", {"filter_id": ORGANIC_GOOGLE_FILTER_ID, "sort": "add_time DESC", "limit": 20})
     deals = resp.get("data") or []
-    if not deals:
-        return None
-    return cm_user_id(deals[0])
+    for d in deals:
+        if d.get("add_time", "") >= ORGANIC_GOOGLE_ROTATION_RESET_AT:
+            return cm_user_id(d)
+    return None
 
 
 def next_in_organic_google_rotation(last_cm):
