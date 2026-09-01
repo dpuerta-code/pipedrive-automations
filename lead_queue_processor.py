@@ -180,7 +180,11 @@ def process_mark_campaign(row):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def process_create_org_lead(row):
+def process_create_org_lead(row, mark_campaign_after=False):
+    """Crea Organizacion + Persona + Lead (con chequeo de duplicados).
+    mark_campaign_after=True se usa cuando esta creacion se disparo desde el
+    link "Marcar Campaña" en una fila Posible New (ahi si se marca Campaing=Yes).
+    Desde el link "Crear Org + Lead" normal, NO se marca Campaing."""
     sheet_company = row["sheet_company"]
     email = row.get("email", "")
     contact_nombre = row.get("contact_nombre", "")
@@ -203,13 +207,15 @@ def process_create_org_lead(row):
         }
 
     if TEST_MODE:
-        print(f"    [TEST] sin duplicados encontrados: crearia Organizacion '{sheet_company}', Persona '{contact_nombre}', Lead, y marcaria Campaing=Yes.")
+        campaing_note = " y marcaria Campaing=Yes" if mark_campaign_after else " (sin marcar Campaing)"
+        print(f"    [TEST] sin duplicados encontrados: crearia Organizacion '{sheet_company}', Persona '{contact_nombre}', Lead{campaing_note}.")
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "", "error_message": ""}
 
     org_id = create_organization(sheet_company, country, head_industry)
     person_id = create_person(contact_nombre, email, org_id) if email or contact_nombre else None
     lead_id = create_lead(sheet_company, org_id, person_id)
-    mark_campaing(lead_id)
+    if mark_campaign_after:
+        mark_campaing(lead_id)
 
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
@@ -242,9 +248,10 @@ def main():
             if action == "mark_campaign":
                 if not str(row.get("org_id", "")).strip():
                     # Posible New sin org_id todavia: no hay Lead que marcar,
-                    # asi que "Marcar Campaña" hace lo mismo que "Crear Org + Lead"
-                    # (que ya deja Campaing=Yes al crear el Lead).
-                    result = process_create_org_lead(row)
+                    # asi que "Marcar Campaña" crea Org+Persona+Lead Y marca
+                    # Campaing=Yes (a diferencia de "Crear Org + Lead", que
+                    # crea todo pero NO marca Campaing).
+                    result = process_create_org_lead(row, mark_campaign_after=True)
                 else:
                     result = process_mark_campaign(row)
             elif action == "create_org_lead":
