@@ -35,6 +35,45 @@ LEAD_MARKER = "Prospección Claude"
 CAMPAING_FIELD_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
 CAMPAING_YES = 1453
 
+# Custom fields de Organizacion usados al crear una org nueva ("Posible New").
+ORG_COUNTRY_FIELD_KEY = "6ba492e23a1d6df40dd0a1127247411b49e617f7"
+ORG_HEAD_INDUSTRY_FIELD_KEY = "2d05783a484e441a0aa07224d4263573fb2e11d7"
+ORG_COMPANY_SIZE_FIELD_KEY = "291c4a7d06c5315afc58342ca361db89a9d802b9"
+ORG_DOMAIN_FIELD_KEY = "e316efbaae3578effff0947aa28352a86e17bf57"
+ORG_WEBSITE_FIELD_KEY = "631e3c6c2b45f45ab23593b4e1707d39db88b5a3"
+ORG_LINKEDIN_FIELD_KEY = "82b4cd3605c175dba7512c673946b8d4b4d83427"
+
+ORG_COUNTRY_OPTIONS = {
+    "Argentina": 315, "Bolivia": 316, "Brazil": 317, "Chile": 318, "Colombia": 319,
+    "Costa Rica": 320, "Dominican Republic": 321, "Ecuador": 322, "El Salvador": 323,
+    "Guatemala": 324, "Honduras": 325, "Mexico": 326, "Nicaragua": 327, "Panama": 328,
+    "Paraguay": 329, "Peru": 330, "Puerto Rico": 331, "Spain": 332, "Uruguay": 333,
+    "Venezuela": 334, "United States": 335, "France": 336, "Italy": 337, "Canada": 338,
+    "United Kingdom": 339, "Germany": 340, "China": 341, "Sweden": 342, "Philippines": 343,
+    "Netherlands": 344, "Singapore": 345, "Denmark": 346, "Belgium": 347, "Japan": 348,
+    "South Africa": 349, "Korea": 350, "Norway": 351, "Malaysia": 352,
+    "United Arab Emirates": 353, "Israel": 354, "Australia": 355, "Cuba": 356,
+    "Other": 357, "Pakistan": 358,
+}
+
+ORG_HEAD_INDUSTRY_OPTIONS = {
+    "Aviation": 622, "Agriculture": 623, "Manufacturing": 624, "Chemicals": 625,
+    "Engineering & Construction Services": 626, "Consumer Products": 627,
+    "Contact Center & BPO": 628, "Education": 629, "Energy & Natural Resources": 630,
+    "Entertainment": 631, "Financial Services": 632, "Firm Services": 633,
+    "Forest Products, Paper & Packaging": 634, "General Services": 635, "Healthcare": 636,
+    "Machinery & Equipment": 638, "Professional Services": 639, "Mining": 640,
+    "Public Sector": 641, "Real Estate": 642, "Retail": 643, "Social Sector": 644,
+    "Technology": 645, "Telecommunications": 646, "Textiles & Leather": 647,
+    "Transportation & Logistics": 648, "Travel & Tourism": 649, "Utilities": 650,
+    "Construction": 1135, "Automotive & Assembly": 1134,
+}
+
+ORG_COMPANY_SIZE_OPTIONS = {
+    "1-10": 373, "11-50": 374, "51-100": 375, "101-200": 376, "201-500": 377,
+    "501-1000": 378, "1001-5000": 379, "5001-10000": 380,
+}
+
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 
 request_count = 0
@@ -148,11 +187,41 @@ def create_person(nombre, email, org_id):
     return resp["data"]["id"]
 
 
-def create_organization(name, country, head_industry):
+def create_organization(name, country, head_industry, company_size, domain, website, org_linkedin):
+    """Crea la Organizacion con todos los campos que ya tengamos disponibles:
+    country, head_industry, company_size (los tres son enums, se traducen a su
+    option_id), domain, website y LinkedIn de organizacion (texto libre)."""
     body = {"name": name}
+
+    if country:
+        country_id = ORG_COUNTRY_OPTIONS.get(country)
+        if country_id:
+            body[ORG_COUNTRY_FIELD_KEY] = country_id
+
+    if head_industry:
+        industry_id = ORG_HEAD_INDUSTRY_OPTIONS.get(head_industry)
+        if industry_id:
+            body[ORG_HEAD_INDUSTRY_FIELD_KEY] = industry_id
+
+    if company_size:
+        size_id = ORG_COMPANY_SIZE_OPTIONS.get(company_size)
+        if size_id:
+            body[ORG_COMPANY_SIZE_FIELD_KEY] = size_id
+
+    if domain:
+        body[ORG_DOMAIN_FIELD_KEY] = domain
+
+    if website:
+        body[ORG_WEBSITE_FIELD_KEY] = website
+    elif domain:
+        # fallback: si no tenemos website explicito pero si domain, se infiere.
+        body[ORG_WEBSITE_FIELD_KEY] = f"https://{domain}"
+
+    if org_linkedin:
+        body[ORG_LINKEDIN_FIELD_KEY] = org_linkedin
+
     resp = api_post("organizations", body)
-    org_id = resp["data"]["id"]
-    return org_id
+    return resp["data"]["id"]
 
 
 def create_lead(sheet_company, org_id, person_id=None):
@@ -212,6 +281,10 @@ def process_create_org_lead(row, mark_campaign_after=False):
     contact_nombre = row.get("contact_nombre", "")
     country = row.get("country", "")
     head_industry = row.get("head_industry", "")
+    company_size = row.get("company_size", "")
+    domain = row.get("domain", "")
+    website = row.get("website", "")
+    org_linkedin = row.get("org_linkedin", "")
 
     name_match = find_org_by_name(sheet_company)
     if name_match:
@@ -233,7 +306,7 @@ def process_create_org_lead(row, mark_campaign_after=False):
         print(f"    [TEST] sin duplicados encontrados: crearia Organizacion '{sheet_company}', Persona '{contact_nombre}', Lead{campaing_note}.")
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "", "error_message": ""}
 
-    org_id = create_organization(sheet_company, country, head_industry)
+    org_id = create_organization(sheet_company, country, head_industry, company_size, domain, website, org_linkedin)
     person_id = create_person(contact_nombre, email, org_id) if email or contact_nombre else None
     lead_id = create_lead(sheet_company, org_id, person_id)
     if mark_campaign_after:
