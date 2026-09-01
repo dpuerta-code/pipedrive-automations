@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
 Todos los dias a las 7am Colombia, para TODOS los leads activos (no
-archivados) de cualquier BDR: si el lead NO tiene ninguna actividad
-pendiente (sin marcar como hecha, sin importar el tipo -- Outbound
-Connection, llamada, whatsapp, task, lo que sea -- ni su due_date), se le
-crea una actividad de tipo "Outbound Connection N" para que no se quede
-sin proximo paso. La actividad se asocia al lead, a la persona del lead,
-y a la organizacion del lead si tiene una, y queda asignada al owner del
-lead.
+archivados) de cualquier BDR: si la PERSONA del lead NO tiene ninguna
+actividad pendiente (sin marcar como hecha, sin importar el tipo --
+Outbound Connection, llamada, whatsapp, task, lo que sea -- ni su
+due_date, y sin importar si esta ligada a este lead o a otro lead de la
+misma persona), se le crea una actividad de tipo "Outbound Connection N"
+para que no se quede sin proximo paso. La actividad se asocia al lead, a
+la persona del lead, y a la organizacion del lead si tiene una, y queda
+asignada al owner del lead.
+
+El chequeo de "pendiente" es a nivel de PERSONA, no de lead: si una
+persona tiene 2+ leads activos (caso raro pero existe) y ya le quedo algo
+pendiente por uno de ellos, no se le crea otra Outbound Connection por el
+otro lead el mismo dia -- evita que la misma persona reciba 2 tareas
+identicas el mismo dia solo porque tiene 2 leads.
 
 El numero N depende de que tan completos estan los "toques" ya marcados
 por lead_touch_numbering_backfill.py (subject con prefijo "Toque N - "):
@@ -30,6 +37,8 @@ from datetime import date
 
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
+
+EXCLUDED_OWNER_IDS = {25168321}  # Valentina Martin Clavijo -- automatizacion pausada para ella
 
 OUTBOUND_TYPE_BY_TOUCH = {1: "outbound_connection_1", 2: "outbound_connection_2", 3: "outbound_connection_3"}
 MAX_TOUCH = 3
@@ -83,7 +92,7 @@ def get_active_leads():
             start = pagination["next_start"]
         else:
             break
-    return [l for l in leads if l.get("person_id")]
+    return [l for l in leads if l.get("person_id") and l.get("owner_id") not in EXCLUDED_OWNER_IDS]
 
 
 def get_person_activities(person_id):
@@ -159,8 +168,12 @@ def main():
         acts = activities_cache[pid]
         lead_activities = [a for a in acts if a.get("lead_id") == lead_id]
 
-        if has_any_pending_activity(lead_activities):
-            print(f"[{i}/{len(leads)}] '{title}': ya tiene una actividad pendiente sin marcar, no se crea otra.")
+        # Ojo: el chequeo de pendientes usa TODAS las actividades de la
+        # persona (acts), no solo las de este lead -- si la persona tiene
+        # 2+ leads activos y ya le quedo algo pendiente por otro lead, no
+        # hace falta crearle otra Outbound Connection el mismo dia.
+        if has_any_pending_activity(acts):
+            print(f"[{i}/{len(leads)}] '{title}': la persona ya tiene una actividad pendiente sin marcar (de este u otro lead), no se crea otra.")
             stats["skipped_pending_activity"] += 1
             continue
 

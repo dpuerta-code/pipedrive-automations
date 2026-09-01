@@ -1,0 +1,34 @@
+name: Email History Sync
+
+on:
+  schedule:
+    - cron: "0 11 * * *"   # 6am Colombia (UTC-5 → 11:00 UTC)
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE: true = solo lectura, false = inserta en ClickHouse"
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Email History Sync
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          CLICKHOUSE_HOST:     ${{ secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT:     ${{ secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER:     ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+        run: python email_history_sync.py
