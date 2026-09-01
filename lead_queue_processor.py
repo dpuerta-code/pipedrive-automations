@@ -240,7 +240,13 @@ def main():
 
         try:
             if action == "mark_campaign":
-                result = process_mark_campaign(row)
+                if not str(row.get("org_id", "")).strip():
+                    # Posible New sin org_id todavia: no hay Lead que marcar,
+                    # asi que "Marcar Campaña" hace lo mismo que "Crear Org + Lead"
+                    # (que ya deja Campaing=Yes al crear el Lead).
+                    result = process_create_org_lead(row)
+                else:
+                    result = process_mark_campaign(row)
             elif action == "create_org_lead":
                 result = process_create_org_lead(row)
             else:
