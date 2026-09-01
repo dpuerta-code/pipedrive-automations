@@ -43,6 +43,10 @@ ORG_DOMAIN_FIELD_KEY = "e316efbaae3578effff0947aa28352a86e17bf57"
 ORG_WEBSITE_FIELD_KEY = "631e3c6c2b45f45ab23593b4e1707d39db88b5a3"
 ORG_LINKEDIN_FIELD_KEY = "82b4cd3605c175dba7512c673946b8d4b4d83427"
 
+# Custom fields de Persona usados al crear una persona nueva.
+PERSON_TITLE_FIELD_KEY = "41d5b08c11bf325cc294e741f13f41a8bb8b4e7a"
+PERSON_LINKEDIN_FIELD_KEY = "70ea681b6702a4b11010edee026c1b4ebfd10f71"
+
 ORG_COUNTRY_OPTIONS = {
     "Argentina": 315, "Bolivia": 316, "Brazil": 317, "Chile": 318, "Colombia": 319,
     "Costa Rica": 320, "Dominican Republic": 321, "Ecuador": 322, "El Salvador": 323,
@@ -179,10 +183,18 @@ def find_orgs_by_email_domain(email):
     return list(orgs.items())
 
 
-def create_person(nombre, email, org_id):
+def create_person(nombre, email, org_id, telefono=None, cargo=None, linkedin=None):
+    """Crea la Persona con todos los campos que ya tengamos disponibles:
+    email, telefono (si aplica), Title (= cargo) y LinkedIn."""
     body = {"name": nombre or email, "org_id": org_id}
     if email:
         body["email"] = [{"value": email, "primary": True}]
+    if telefono:
+        body["phone"] = [{"value": telefono, "primary": True}]
+    if cargo:
+        body[PERSON_TITLE_FIELD_KEY] = cargo
+    if linkedin:
+        body[PERSON_LINKEDIN_FIELD_KEY] = linkedin
     resp = api_post("persons", body)
     return resp["data"]["id"]
 
@@ -236,7 +248,7 @@ def mark_campaing(lead_id):
     api_patch(f"leads/{lead_id}", {CAMPAING_FIELD_KEY: CAMPAING_YES})
 
 
-def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email):
+def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono=None, cargo=None, linkedin=None):
     """Busca o crea el Lead del programa para una org matcheada, marca Campaing=Yes.
     Devuelve (lead_id, person_id)."""
     lead = existing_program_lead(org_id)
@@ -249,7 +261,7 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
     if org_category == "Coverage":
         person_id = find_existing_person(contact_nombre, email, org_id)
         if not person_id and not TEST_MODE:
-            person_id = create_person(contact_nombre, email, org_id)
+            person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
     if TEST_MODE:
         print(f"    [TEST] crearia Lead para org {org_id} ('{sheet_company}') y marcaria Campaing=Yes.")
@@ -266,8 +278,11 @@ def process_mark_campaign(row):
     org_category = row.get("org_category") or "Coverage"
     contact_nombre = row.get("contact_nombre", "")
     email = row.get("email", "")
+    telefono = row.get("telefono", "")
+    cargo = row.get("cargo", "")
+    linkedin = row.get("linkedin", "")
 
-    lead_id, person_id = ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email)
+    lead_id, person_id = ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin)
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
@@ -279,6 +294,9 @@ def process_create_org_lead(row, mark_campaign_after=False):
     sheet_company = row["sheet_company"]
     email = row.get("email", "")
     contact_nombre = row.get("contact_nombre", "")
+    telefono = row.get("telefono", "")
+    cargo = row.get("cargo", "")
+    linkedin = row.get("linkedin", "")
     country = row.get("country", "")
     head_industry = row.get("head_industry", "")
     company_size = row.get("company_size", "")
@@ -307,7 +325,7 @@ def process_create_org_lead(row, mark_campaign_after=False):
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "", "error_message": ""}
 
     org_id = create_organization(sheet_company, country, head_industry, company_size, domain, website, org_linkedin)
-    person_id = create_person(contact_nombre, email, org_id) if email or contact_nombre else None
+    person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin) if email or contact_nombre else None
     lead_id = create_lead(sheet_company, org_id, person_id)
     if mark_campaign_after:
         mark_campaing(lead_id)

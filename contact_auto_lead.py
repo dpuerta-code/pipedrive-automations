@@ -33,6 +33,10 @@ ROSTER_TAB = "Roster"
 
 LEAD_MARKER = "Prospección Claude"
 
+# Custom fields de Persona usados al crear una persona nueva.
+PERSON_TITLE_FIELD_KEY = "41d5b08c11bf325cc294e741f13f41a8bb8b4e7a"
+PERSON_LINKEDIN_FIELD_KEY = "70ea681b6702a4b11010edee026c1b4ebfd10f71"
+
 CONTACT_ACTIVITY_TYPES = [
     "whatsapp",
     "aircall_outbound_answered_",
@@ -192,10 +196,18 @@ def find_existing_person(contact_nombre, email, org_id):
     return find_person_in_org_by_name(contact_nombre, org_id) or find_person_by_email(email)
 
 
-def create_person(nombre, email, org_id):
+def create_person(nombre, email, org_id, telefono=None, cargo=None, linkedin=None):
+    """Crea la Persona con todos los campos que ya tengamos disponibles:
+    email, telefono (si aplica), Title (= cargo) y LinkedIn."""
     body = {"name": nombre or email, "org_id": org_id}
     if email:
         body["email"] = [{"value": email, "primary": True}]
+    if telefono:
+        body["phone"] = [{"value": telefono, "primary": True}]
+    if cargo:
+        body[PERSON_TITLE_FIELD_KEY] = cargo
+    if linkedin:
+        body[PERSON_LINKEDIN_FIELD_KEY] = linkedin
     resp = api_post("persons", body)
     return resp["data"]["id"]
 
@@ -238,6 +250,9 @@ def main():
         org_category = row.get("org_category", "Coverage")
         contact_nombre = row.get("contact_nombre", "")
         email = row.get("email", "")
+        telefono = row.get("telefono", "")
+        cargo = row.get("cargo", "")
+        linkedin = row.get("linkedin", "")
 
         if org_id not in contacted_org_ids:
             skipped_no_contact += 1
@@ -260,7 +275,7 @@ def main():
             if org_category == "Coverage":
                 person_id = find_existing_person(contact_nombre, email, org_id)
                 if not person_id:
-                    person_id = create_person(contact_nombre, email, org_id)
+                    person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
             lead_id = create_lead(sheet_company, org_id, person_id)
             print(f"  '{sheet_company}' (org {org_id}): Lead creado (id {lead_id}) por contacto real detectado.")
