@@ -90,12 +90,34 @@ def existing_program_lead(org_id):
     return None
 
 
+def find_person_in_org_by_name(name, org_id):
+    """Busca una persona con el mismo nombre DENTRO de esa organizacion.
+    Chequeo principal para evitar duplicados cuando el email de la hoja
+    esta desactualizado."""
+    if not name:
+        return None
+    resp = api_get("persons/search", {"term": name, "fields": "name", "organization_id": org_id})
+    items = (resp.get("data") or {}).get("items") or []
+    target = name.strip().lower()
+    for it in items:
+        person = it.get("item") or {}
+        if (person.get("name") or "").strip().lower() == target:
+            return person.get("id")
+    return None
+
+
 def find_person_by_email(email):
+    """Chequeo de respaldo (el email de la hoja puede estar desactualizado,
+    por eso find_person_in_org_by_name se intenta primero)."""
     if not email:
         return None
     resp = api_get("persons/search", {"term": email, "fields": "email", "exact_match": "true"})
     items = (resp.get("data") or {}).get("items") or []
     return items[0]["item"]["id"] if items else None
+
+
+def find_existing_person(contact_nombre, email, org_id):
+    return find_person_in_org_by_name(contact_nombre, org_id) or find_person_by_email(email)
 
 
 def find_org_by_name(name):
@@ -156,7 +178,7 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
 
     person_id = None
     if org_category == "Coverage":
-        person_id = find_person_by_email(email)
+        person_id = find_existing_person(contact_nombre, email, org_id)
         if not person_id and not TEST_MODE:
             person_id = create_person(contact_nombre, email, org_id)
 
