@@ -147,6 +147,16 @@ def api_patch(endpoint, data):
     return r.json()
 
 
+def api_put(endpoint, data):
+    """Los endpoints /organizations y /persons de esta cuenta (API v1 vieja)
+    no aceptan PATCH ('Unknown method .') — hay que usar PUT para
+    actualizarlos. /leads si acepta PATCH (ver mark_campaing)."""
+    rate_limit()
+    r = requests.put(f"{BASE_URL}/{endpoint}", params={"api_token": API_TOKEN}, json=data, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
 _mcp_session_id = None
 _mcp_request_id = 0
 
@@ -393,6 +403,63 @@ def create_organization(name, country, head_industry, company_size, domain, webs
     return resp["data"]["id"]
 
 
+def enrich_existing_person(person_id, email=None, telefono=None):
+    """Si la persona ya existe, agrega el email/telefono del Sheet como
+    entrada ADICIONAL (no primaria) si todavia no los tiene — nunca
+    reemplaza ni borra ningun email/telefono que ya tuviera."""
+    email = email.strip() if email and email.strip().upper() not in ("N/D", "") else None
+    telefono = telefono.strip() if telefono and telefono.strip().upper() not in ("N/D", "") else None
+    if not email and not telefono:
+        return
+    resp = api_get(f"persons/{person_id}")
+    person = resp.get("data") or {}
+    update = {}
+    if email:
+        existing = [(e.get("value") or "").strip().lower() for e in (person.get("email") or [])]
+        if email.lower() not in existing:
+            update["email"] = (person.get("email") or []) + [{"value": email, "primary": False}]
+    if telefono:
+        existing = [(p.get("value") or "").strip() for p in (person.get("phone") or [])]
+        if telefono not in existing:
+            update["phone"] = (person.get("phone") or []) + [{"value": telefono, "primary": False}]
+    if not update:
+        return
+    if TEST_MODE:
+        print(f"    [TEST] agregaria a persona existente {person_id}: {list(update.keys())}")
+        return
+    api_put(f"persons/{person_id}", update)
+
+
+def enrich_existing_org(org_id, domain=None, website=None, org_linkedin=None, company_size=None):
+    """Si la organizacion ya existe, completa domain/website/linkedin/tamano
+    de empresa con los datos del Sheet SOLO si el campo esta vacio en
+    Pipedrive — nunca sobreescribe un valor que ya tenia."""
+    if not any([domain, website, org_linkedin, company_size]):
+        return
+    resp = api_get(f"organizations/{org_id}")
+    org = resp.get("data") or {}
+    update = {}
+    if domain and not org.get(ORG_DOMAIN_FIELD_KEY):
+        update[ORG_DOMAIN_FIELD_KEY] = domain
+    if not org.get(ORG_WEBSITE_FIELD_KEY):
+        if website:
+            update[ORG_WEBSITE_FIELD_KEY] = website
+        elif domain:
+            update[ORG_WEBSITE_FIELD_KEY] = f"https://{domain}"
+    if org_linkedin and not org.get(ORG_LINKEDIN_FIELD_KEY):
+        update[ORG_LINKEDIN_FIELD_KEY] = org_linkedin
+    if company_size and not org.get(ORG_COMPANY_SIZE_FIELD_KEY):
+        size_id = ORG_COMPANY_SIZE_OPTIONS.get(company_size)
+        if size_id:
+            update[ORG_COMPANY_SIZE_FIELD_KEY] = size_id
+    if not update:
+        return
+    if TEST_MODE:
+        print(f"    [TEST] completaria en org existente {org_id}: {list(update.keys())}")
+        return
+    api_put(f"organizations/{org_id}", update)
+
+
 def create_lead(sheet_company, org_id, person_id=None, owner_id=None):
     body = {"title": f"{sheet_company} - {LEAD_MARKER}", "organization_id": org_id}
     if person_id:
@@ -407,19 +474,31 @@ def mark_campaing(lead_id):
     api_patch(f"leads/{lead_id}", {CAMPAING_FIELD_KEY: CAMPAING_YES})
 
 
-def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono=None, cargo=None, linkedin=None, owner_id=None):
+def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono=None, cargo=None, linkedin=None, owner_id=None,
+                              domain=None, website=None, org_linkedin=None, company_size=None):
     """Busca o crea el Lead del programa para una org matcheada, marca Campaing=Yes.
-    Devuelve (lead_id, person_id)."""
+    De paso completa datos faltantes de la Organizacion existente (domain/
+    website/linkedin/company_size, solo si estaban vacios) y, si reutiliza
+    una Persona existente, le agrega el email/telefono del Sheet si no los
+    tenia — nunca sobreescribe nada que ya existiera. Devuelve (lead_id, person_id)."""
+    if not TEST_MODE:
+        enrich_existing_org(org_id, domain, website, org_linkedin, company_size)
+
     lead = existing_program_lead(org_id)
     if lead:
         if not TEST_MODE:
             mark_campaing(lead["id"])
+            if lead.get("person_id"):
+                enrich_existing_person(lead["person_id"], email, telefono)
         return lead["id"], lead.get("person_id")
 
     person_id = None
     if org_category == "Coverage":
         person_id = find_existing_person(contact_nombre, email, org_id)
-        if not person_id and not TEST_MODE:
+        if person_id:
+            if not TEST_MODE:
+                enrich_existing_person(person_id, email, telefono)
+        elif not TEST_MODE:
             person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
     if TEST_MODE:
@@ -440,9 +519,16 @@ def process_mark_campaign(row, rotation_map):
     telefono = row.get("telefono", "")
     cargo = row.get("cargo", "")
     linkedin = row.get("linkedin", "")
+    domain = row.get("domain", "")
+    website = row.get("website", "")
+    org_linkedin = row.get("org_linkedin", "")
+    company_size = row.get("company_size", "")
     owner_id = get_territory_owner(rotation_map, row.get("territorio"))
 
-    lead_id, person_id = ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin, owner_id)
+    lead_id, person_id = ensure_lead_and_campaing(
+        org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin, owner_id,
+        domain=domain, website=website, org_linkedin=org_linkedin, company_size=company_size,
+    )
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
@@ -458,10 +544,19 @@ def process_create_lead_no_campaign(row, rotation_map):
     telefono = row.get("telefono", "")
     cargo = row.get("cargo", "")
     linkedin = row.get("linkedin", "")
+    domain = row.get("domain", "")
+    website = row.get("website", "")
+    org_linkedin = row.get("org_linkedin", "")
+    company_size = row.get("company_size", "")
     owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+
+    if not TEST_MODE:
+        enrich_existing_org(org_id, domain, website, org_linkedin, company_size)
 
     existing_lead = existing_program_lead(org_id)
     if existing_lead:
+        if not TEST_MODE and existing_lead.get("person_id"):
+            enrich_existing_person(existing_lead["person_id"], email, telefono)
         return {
             "status": "done", "result_org_id": org_id, "result_person_id": existing_lead.get("person_id"),
             "result_lead_id": existing_lead["id"],
@@ -474,7 +569,9 @@ def process_create_lead_no_campaign(row, rotation_map):
         print(f"    [TEST] {'usaria persona existente' if person_id else 'crearia Persona'} '{contact_nombre}' y Lead para org {org_id} ('{sheet_company}') con owner {owner_id}, SIN marcar Campaing.")
         return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": "", "error_message": ""}
 
-    if not person_id:
+    if person_id:
+        enrich_existing_person(person_id, email, telefono)
+    else:
         person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
     lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
