@@ -20,7 +20,7 @@ Cron GitHub Actions: cada hora aprox.
 import os
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 
 import gspread
 import requests
@@ -30,6 +30,11 @@ BASE_URL = "https://slang.pipedrive.com/api/v1"
 
 QUEUE_SPREADSHEET_ID = "1g2MVl8H17gTtmSMKPZKypPIXRwRCIboMYZycFLH9VnY"
 QUEUE_TAB = "Sheet1"
+ROTATION_TAB = "Rotacion"
+
+# Owner de un Lead cuando su territorio no tiene nadie asignado esa semana
+# en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
+FALLBACK_OWNER_ID = 22926796  # Sofia Puerta (d.puerta@slangapp.com)
 
 LEAD_MARKER = "Prospección Claude"
 CAMPAING_FIELD_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
@@ -123,6 +128,39 @@ def get_sheet():
     creds = json.loads(os.environ["GOOGLE_SHEETS_CREDENTIALS"])
     gc = gspread.service_account_from_dict(creds)
     return gc.open_by_key(QUEUE_SPREADSHEET_ID)
+
+
+def current_week_monday():
+    today = date.today()
+    return today - timedelta(days=today.weekday())
+
+
+def load_rotation_map(sh):
+    """Lee el tab Rotacion una sola vez y arma {(semana_inicio, territorio): owner_id}.
+    La rotacion semanal (quien cubre cada territorio) se mantiene manualmente en
+    ese tab a partir del deck de rotacion del equipo."""
+    ws = sh.worksheet(ROTATION_TAB)
+    rotation_map = {}
+    for row in ws.get_all_records():
+        semana = str(row.get("semana_inicio", "")).strip()
+        try:
+            territorio = int(row.get("territorio"))
+            owner_id = int(row.get("owner_id"))
+        except (TypeError, ValueError):
+            continue
+        rotation_map[(semana, territorio)] = owner_id
+    return rotation_map
+
+
+def get_territory_owner(rotation_map, territorio):
+    """owner_id para el territorio en la semana actual, o FALLBACK_OWNER_ID si
+    el territorio esta vacio en la rotacion de esta semana (o es desconocido)."""
+    try:
+        territorio = int(territorio)
+    except (TypeError, ValueError):
+        return FALLBACK_OWNER_ID
+    monday = current_week_monday().isoformat()
+    return rotation_map.get((monday, territorio), FALLBACK_OWNER_ID)
 
 
 def existing_program_lead(org_id):
@@ -236,10 +274,12 @@ def create_organization(name, country, head_industry, company_size, domain, webs
     return resp["data"]["id"]
 
 
-def create_lead(sheet_company, org_id, person_id=None):
+def create_lead(sheet_company, org_id, person_id=None, owner_id=None):
     body = {"title": f"{sheet_company} - {LEAD_MARKER}", "organization_id": org_id}
     if person_id:
         body["person_id"] = person_id
+    if owner_id:
+        body["owner_id"] = owner_id
     resp = api_post("leads", body)
     return resp["data"]["id"]
 
@@ -248,7 +288,7 @@ def mark_campaing(lead_id):
     api_patch(f"leads/{lead_id}", {CAMPAING_FIELD_KEY: CAMPAING_YES})
 
 
-def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono=None, cargo=None, linkedin=None):
+def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono=None, cargo=None, linkedin=None, owner_id=None):
     """Busca o crea el Lead del programa para una org matcheada, marca Campaing=Yes.
     Devuelve (lead_id, person_id)."""
     lead = existing_program_lead(org_id)
@@ -264,15 +304,15 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
             person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
     if TEST_MODE:
-        print(f"    [TEST] crearia Lead para org {org_id} ('{sheet_company}') y marcaria Campaing=Yes.")
+        print(f"    [TEST] crearia Lead para org {org_id} ('{sheet_company}') con owner {owner_id} y marcaria Campaing=Yes.")
         return None, person_id
 
-    lead_id = create_lead(sheet_company, org_id, person_id)
+    lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
     mark_campaing(lead_id)
     return lead_id, person_id
 
 
-def process_mark_campaign(row):
+def process_mark_campaign(row, rotation_map):
     org_id = int(row["org_id"])
     sheet_company = row["sheet_company"]
     org_category = row.get("org_category") or "Coverage"
@@ -281,12 +321,13 @@ def process_mark_campaign(row):
     telefono = row.get("telefono", "")
     cargo = row.get("cargo", "")
     linkedin = row.get("linkedin", "")
+    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
 
-    lead_id, person_id = ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin)
+    lead_id, person_id = ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin, owner_id)
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def process_create_org_lead(row, mark_campaign_after=False):
+def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
     """Crea Organizacion + Persona + Lead (con chequeo de duplicados).
     mark_campaign_after=True se usa cuando esta creacion se disparo desde el
     link "Marcar Campaña" en una fila Posible New (ahi si se marca Campaing=Yes).
@@ -303,6 +344,7 @@ def process_create_org_lead(row, mark_campaign_after=False):
     domain = row.get("domain", "")
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
+    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
 
     name_match = find_org_by_name(sheet_company)
     if name_match:
@@ -326,7 +368,7 @@ def process_create_org_lead(row, mark_campaign_after=False):
 
     org_id = create_organization(sheet_company, country, head_industry, company_size, domain, website, org_linkedin)
     person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin) if email or contact_nombre else None
-    lead_id = create_lead(sheet_company, org_id, person_id)
+    lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
     if mark_campaign_after:
         mark_campaing(lead_id)
 
@@ -343,6 +385,7 @@ def main():
     sh = get_sheet()
     ws = sh.worksheet(QUEUE_TAB)
     records = ws.get_all_records()
+    rotation_map = load_rotation_map(sh)
 
     pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
     print(f"Filas pendientes: {len(pending)}\n")
@@ -364,11 +407,11 @@ def main():
                     # asi que "Marcar Campaña" crea Org+Persona+Lead Y marca
                     # Campaing=Yes (a diferencia de "Crear Org + Lead", que
                     # crea todo pero NO marca Campaing).
-                    result = process_create_org_lead(row, mark_campaign_after=True)
+                    result = process_create_org_lead(row, rotation_map, mark_campaign_after=True)
                 else:
-                    result = process_mark_campaign(row)
+                    result = process_mark_campaign(row, rotation_map)
             elif action == "create_org_lead":
-                result = process_create_org_lead(row)
+                result = process_create_org_lead(row, rotation_map)
             else:
                 result = {"status": "error", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
                           "error_message": f"action desconocida: {action}"}

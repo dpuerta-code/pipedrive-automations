@@ -30,8 +30,13 @@ BASE_URL = "https://slang.pipedrive.com/api/v1"
 
 QUEUE_SPREADSHEET_ID = "1g2MVl8H17gTtmSMKPZKypPIXRwRCIboMYZycFLH9VnY"
 ROSTER_TAB = "Roster"
+ROTATION_TAB = "Rotacion"
 
 LEAD_MARKER = "Prospección Claude"
+
+# Owner de un Lead cuando su territorio no tiene nadie asignado esa semana
+# en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
+FALLBACK_OWNER_ID = 22926796  # Sofia Puerta (d.puerta@slangapp.com)
 
 # Custom fields de Persona usados al crear una persona nueva.
 PERSON_TITLE_FIELD_KEY = "41d5b08c11bf325cc294e741f13f41a8bb8b4e7a"
@@ -84,13 +89,49 @@ def api_post(endpoint, data):
     return r.json()
 
 
-def get_roster():
+def get_sheet():
     creds = json.loads(os.environ["GOOGLE_SHEETS_CREDENTIALS"])
     gc = gspread.service_account_from_dict(creds)
-    sh = gc.open_by_key(QUEUE_SPREADSHEET_ID)
+    return gc.open_by_key(QUEUE_SPREADSHEET_ID)
+
+
+def get_roster(sh):
     ws = sh.worksheet(ROSTER_TAB)
     rows = ws.get_all_records()
     return [r for r in rows if str(r.get("org_id", "")).strip()]
+
+
+def current_week_monday():
+    today = date.today()
+    return today - timedelta(days=today.weekday())
+
+
+def load_rotation_map(sh):
+    """Lee el tab Rotacion una sola vez y arma {(semana_inicio, territorio): owner_id}.
+    La rotacion semanal (quien cubre cada territorio) se mantiene manualmente en
+    ese tab a partir del deck de rotacion del equipo."""
+    ws = sh.worksheet(ROTATION_TAB)
+    rotation_map = {}
+    for row in ws.get_all_records():
+        semana = str(row.get("semana_inicio", "")).strip()
+        try:
+            territorio = int(row.get("territorio"))
+            owner_id = int(row.get("owner_id"))
+        except (TypeError, ValueError):
+            continue
+        rotation_map[(semana, territorio)] = owner_id
+    return rotation_map
+
+
+def get_territory_owner(rotation_map, territorio):
+    """owner_id para el territorio en la semana actual, o FALLBACK_OWNER_ID si
+    el territorio esta vacio en la rotacion de esta semana (o es desconocido)."""
+    try:
+        territorio = int(territorio)
+    except (TypeError, ValueError):
+        return FALLBACK_OWNER_ID
+    monday = current_week_monday().isoformat()
+    return rotation_map.get((monday, territorio), FALLBACK_OWNER_ID)
 
 
 def fetch_recent_activity_org_ids(person_cache):
@@ -212,13 +253,15 @@ def create_person(nombre, email, org_id, telefono=None, cargo=None, linkedin=Non
     return resp["data"]["id"]
 
 
-def create_lead(sheet_company, org_id, person_id=None):
+def create_lead(sheet_company, org_id, person_id=None, owner_id=None):
     body = {
         "title": f"{sheet_company} - {LEAD_MARKER}",
         "organization_id": org_id,
     }
     if person_id:
         body["person_id"] = person_id
+    if owner_id:
+        body["owner_id"] = owner_id
     resp = api_post("leads", body)
     return resp["data"]["id"]
 
@@ -230,7 +273,9 @@ def main():
         print("MODO TEST: solo lectura, no se crea nada en Pipedrive")
     print(f"{'='*60}\n")
 
-    roster = get_roster()
+    sh = get_sheet()
+    roster = get_roster(sh)
+    rotation_map = load_rotation_map(sh)
     print(f"Roster: {len(roster)} organizaciones a vigilar.")
 
     person_cache = {}
@@ -253,6 +298,7 @@ def main():
         telefono = row.get("telefono", "")
         cargo = row.get("cargo", "")
         linkedin = row.get("linkedin", "")
+        owner_id = get_territory_owner(rotation_map, row.get("territorio"))
 
         if org_id not in contacted_org_ids:
             skipped_no_contact += 1
@@ -277,7 +323,7 @@ def main():
                 if not person_id:
                     person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
-            lead_id = create_lead(sheet_company, org_id, person_id)
+            lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
             print(f"  '{sheet_company}' (org {org_id}): Lead creado (id {lead_id}) por contacto real detectado.")
             created += 1
         except Exception as e:
