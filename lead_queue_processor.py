@@ -292,12 +292,22 @@ def get_territory_owner(rotation_map, territorio):
     return rotation_map.get((monday, territorio), FALLBACK_OWNER_ID)
 
 
-def existing_program_lead(org_id):
+def existing_program_lead(org_id, person_id=None):
+    """Busca un Lead del programa ("Prospección Claude") para esta org.
+
+    Si se pasa `person_id`, el match es por (org_id, person_id): asi, si la
+    misma organizacion tiene 2 contactos distintos, cada uno recibe su
+    propio Lead en vez de reusar el de otra persona. Sin `person_id` (caso
+    Comeback, sin persona asociada), vuelve al comportamiento anterior de
+    "un Lead por organizacion"."""
     resp = api_get("leads", {"organization_id": org_id, "limit": 100})
-    for lead in resp.get("data") or []:
-        if LEAD_MARKER in (lead.get("title") or ""):
-            return lead
-    return None
+    matching = [l for l in (resp.get("data") or []) if LEAD_MARKER in (l.get("title") or "")]
+    if person_id is not None:
+        for lead in matching:
+            if lead.get("person_id") == person_id:
+                return lead
+        return None
+    return matching[0] if matching else None
 
 
 def find_person_in_org_by_name(name, org_id):
@@ -480,17 +490,15 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
     De paso completa datos faltantes de la Organizacion existente (domain/
     website/linkedin/company_size, solo si estaban vacios) y, si reutiliza
     una Persona existente, le agrega el email/telefono del Sheet si no los
-    tenia — nunca sobreescribe nada que ya existiera. Devuelve (lead_id, person_id)."""
+    tenia — nunca sobreescribe nada que ya existiera.
+
+    El Lead existente se busca por (org_id, person_id): si la misma
+    organizacion tiene 2 contactos distintos (2 filas en el Sheet), cada
+    contacto recibe su propio Lead en vez de que el segundo solo reutilice
+    el Lead del primero. Para Comeback (sin persona asociada) se mantiene
+    "un Lead por organizacion". Devuelve (lead_id, person_id)."""
     if not TEST_MODE:
         enrich_existing_org(org_id, domain, website, org_linkedin, company_size)
-
-    lead = existing_program_lead(org_id)
-    if lead:
-        if not TEST_MODE:
-            mark_campaing(lead["id"])
-            if lead.get("person_id"):
-                enrich_existing_person(lead["person_id"], email, telefono)
-        return lead["id"], lead.get("person_id")
 
     person_id = None
     if org_category == "Coverage":
@@ -501,8 +509,14 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
         elif not TEST_MODE:
             person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
 
+    lead = existing_program_lead(org_id, person_id)
+    if lead:
+        if not TEST_MODE:
+            mark_campaing(lead["id"])
+        return lead["id"], lead.get("person_id")
+
     if TEST_MODE:
-        print(f"    [TEST] crearia Lead para org {org_id} ('{sheet_company}') con owner {owner_id} y marcaria Campaing=Yes.")
+        print(f"    [TEST] crearia Lead para org {org_id} ('{sheet_company}') persona {person_id} con owner {owner_id} y marcaria Campaing=Yes.")
         return None, person_id
 
     lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
@@ -553,16 +567,6 @@ def process_create_lead_no_campaign(row, rotation_map):
     if not TEST_MODE:
         enrich_existing_org(org_id, domain, website, org_linkedin, company_size)
 
-    existing_lead = existing_program_lead(org_id)
-    if existing_lead:
-        if not TEST_MODE and existing_lead.get("person_id"):
-            enrich_existing_person(existing_lead["person_id"], email, telefono)
-        return {
-            "status": "done", "result_org_id": org_id, "result_person_id": existing_lead.get("person_id"),
-            "result_lead_id": existing_lead["id"],
-            "error_message": "Ya existia un Lead del programa para esta org (no se toco Campaing)",
-        }
-
     person_id = find_existing_person(contact_nombre, email, org_id)
 
     if TEST_MODE:
@@ -573,6 +577,17 @@ def process_create_lead_no_campaign(row, rotation_map):
         enrich_existing_person(person_id, email, telefono)
     else:
         person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
+
+    # Match por (org_id, person_id): si esta MISMA persona ya tiene un Lead
+    # del programa en esta org, no se duplica. Si es un contacto distinto
+    # de la misma org, se crea su propio Lead.
+    existing_lead = existing_program_lead(org_id, person_id)
+    if existing_lead:
+        return {
+            "status": "done", "result_org_id": org_id, "result_person_id": person_id,
+            "result_lead_id": existing_lead["id"],
+            "error_message": "Ya existia un Lead del programa para esta persona en esta org (no se toco Campaing)",
+        }
 
     lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
@@ -599,10 +614,40 @@ def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
 
     name_match = find_org_by_name(sheet_company)
     if name_match:
-        return {
-            "status": "needs_review", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-            "error_message": f"Posible duplicado por nombre: org existente '{name_match.get('name')}' (id {name_match.get('id')})",
-        }
+        existing_org_id = name_match.get("id")
+        # Si esa org "duplicada" ya tiene un Lead del programa (o sea, la
+        # creamos nosotros mismos en una fila anterior de este mismo Sheet
+        # — el caso tipico de 2 contactos distintos para la misma empresa
+        # nueva), no es un duplicado real: se agrega este 2do contacto como
+        # Persona + Lead nuevo en la MISMA org, en vez de needs_review.
+        if existing_program_lead(existing_org_id) is None:
+            return {
+                "status": "needs_review", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+                "error_message": f"Posible duplicado por nombre: org existente '{name_match.get('name')}' (id {existing_org_id})",
+            }
+
+        person_id = find_existing_person(contact_nombre, email, existing_org_id)
+
+        if TEST_MODE:
+            print(f"    [TEST] '{sheet_company}' (id {existing_org_id}) ya la creo este programa antes — agregaria {'la persona existente' if person_id else 'una Persona nueva'} y su propio Lead.")
+            return {"status": "done", "result_org_id": existing_org_id, "result_person_id": person_id, "result_lead_id": "", "error_message": ""}
+
+        if person_id:
+            enrich_existing_person(person_id, email, telefono)
+        else:
+            person_id = create_person(contact_nombre, email, existing_org_id, telefono, cargo, linkedin)
+
+        dup_lead = existing_program_lead(existing_org_id, person_id)
+        if dup_lead:
+            if mark_campaign_after:
+                mark_campaing(dup_lead["id"])
+            return {"status": "done", "result_org_id": existing_org_id, "result_person_id": person_id,
+                    "result_lead_id": dup_lead["id"], "error_message": "Ya existia un Lead del programa para esta persona en esta org"}
+
+        lead_id = create_lead(sheet_company, existing_org_id, person_id, owner_id)
+        if mark_campaign_after:
+            mark_campaing(lead_id)
+        return {"status": "done", "result_org_id": existing_org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
     domain_matches = find_orgs_by_email_domain(email)
     if domain_matches:

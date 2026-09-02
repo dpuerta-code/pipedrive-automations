@@ -2,7 +2,9 @@ name: Lead Queue Processor
 
 on:
   schedule:
-    - cron: "7 * * * *"   # cada hora aprox (minuto 7, para no coincidir con otros crons)
+    # Cada 15 min, lunes a viernes, 8am-5pm hora Colombia (UTC-5, sin DST)
+    # => 13:00-22:00 UTC.
+    - cron: "*/15 13-22 * * 1-5"
   workflow_dispatch:
     inputs:
       test_mode:
