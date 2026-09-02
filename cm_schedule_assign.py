@@ -133,13 +133,24 @@ CM_SE_KEY = "ae660fc6250e95791638d5e5a054b5077e2129d6"           # CM SE (user f
 BDR_KEY = "64580d9fd4762bd5d18027ee8fb90ab3a93201d3"             # BDR (user field)
 CM_SCHEDULED_ON_KEY = "12a53bac7b0c1a6d7d743f6ee2ad09e567b62ed8"  # CM scheduled on (date field)
 
-# Grupo SE: pool fijo de CMs elegibles para el balanceo.
+# Grupo SE: pool fijo de CMs elegibles para el balanceo, rotacion
+# organic/google y continuidad.
 CM_POOL = {
     21686645: "Manoella De Andreis",
     21983370: "Daniel Fiquitiva",
     21983348: "Andres Mayusa",
     21983447: "Sofia Bello",
     21686656: "Fabian Cubillos",
+}
+
+# Valentina Carrillo (agregada 2026-09-02): SOLO para la Excepcion 1
+# (autoasignacion cuando ella misma es BDR y CM SE). A proposito NO forma
+# parte de CM_POOL -- no debe entrar al balanceo, a la rotacion
+# organic/google, ni contar como candidata de continuidad. El usuario dijo
+# explicitamente que por ahora es "solo en el caso de que ella misma sea
+# BDR y SE".
+SELF_ASSIGN_ONLY_POOL = {
+    21997527: "Valentina Carrillo",
 }
 
 # Stages con order_nr >= la etapa "Opp" de su propio pipeline (id -> nombre):
@@ -438,7 +449,7 @@ def main():
 
         continuity_cm = None
         is_organic_google = False
-        if bdr_id in CM_POOL:
+        if bdr_id in CM_POOL or bdr_id in SELF_ASSIGN_ONLY_POOL:
             chosen_cm = bdr_id
             reason = "BDR es del Grupo SE, se autoasigna"
             counts_toward_load = False
@@ -465,14 +476,14 @@ def main():
             counts_toward_load = True
             last_assigned_cm = chosen_cm  # avanza el puntero para el resto de esta corrida
 
-        cm_name = CM_POOL.get(chosen_cm, f"user {chosen_cm}")
+        cm_name = CM_POOL.get(chosen_cm) or SELF_ASSIGN_ONLY_POOL.get(chosen_cm) or f"user {chosen_cm}"
 
         if TEST_MODE:
             print(f"[{i}/{len(pending)}] '{title}' (deal {deal_id}): [TEST] asignaria a {cm_name} ({reason})")
             if counts_toward_load and chosen_cm in load:
                 load[chosen_cm] += 1
             stats["assigned"] += 1
-            if bdr_id in CM_POOL:
+            if bdr_id in CM_POOL or bdr_id in SELF_ASSIGN_ONLY_POOL:
                 stats["assigned_self_bdr"] += 1
             elif is_organic_google:
                 stats["assigned_organic_google"] += 1
@@ -488,7 +499,7 @@ def main():
                 if counts_toward_load and chosen_cm in load:
                     load[chosen_cm] += 1
                 stats["assigned"] += 1
-                if bdr_id in CM_POOL:
+                if bdr_id in CM_POOL or bdr_id in SELF_ASSIGN_ONLY_POOL:
                     stats["assigned_self_bdr"] += 1
                 elif is_organic_google:
                     stats["assigned_organic_google"] += 1
