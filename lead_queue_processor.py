@@ -11,7 +11,9 @@ Procesa la cola de clicks del dashboard de Metabase (tab "Sheet1" de la hoja
   Si encuentra un posible duplicado, deja la fila en 'needs_review' sin
   crear nada. Al Lead resultante tambien se le marca "Campaing" = Yes.
 
-No depende de ClickHouse — solo Pipedrive API + Google Sheets API.
+No depende de ClickHouse — solo Pipedrive API + Google Sheets vía Composio
+(reusa la conexion de Google ya autorizada en Composio, sin necesitar un
+service account de Google Cloud).
 
 TEST_MODE=true -> solo imprime lo que haria, no escribe nada.
 Cron GitHub Actions: cada hora aprox.
@@ -22,11 +24,13 @@ import time
 import json
 from datetime import datetime, timezone, date, timedelta
 
-import gspread
 import requests
 
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
+
+COMPOSIO_API_KEY = os.environ["COMPOSIO_API_KEY"]
+COMPOSIO_MCP_URL = "https://connect.composio.dev/mcp"
 
 QUEUE_SPREADSHEET_ID = "1g2MVl8H17gTtmSMKPZKypPIXRwRCIboMYZycFLH9VnY"
 QUEUE_TAB = "Sheet1"
@@ -124,10 +128,106 @@ def api_patch(endpoint, data):
     return r.json()
 
 
-def get_sheet():
-    creds = json.loads(os.environ["GOOGLE_SHEETS_CREDENTIALS"])
-    gc = gspread.service_account_from_dict(creds)
-    return gc.open_by_key(QUEUE_SPREADSHEET_ID)
+_mcp_session_id = None
+_mcp_request_id = 0
+
+
+def _mcp_request(method, params=None):
+    """Llamada JSON-RPC al endpoint MCP de Composio (transporte HTTP con SSE).
+    Reusa el Mcp-Session-Id devuelto por 'initialize' en llamadas siguientes."""
+    global _mcp_session_id, _mcp_request_id
+    _mcp_request_id += 1
+    headers = {
+        "X-CONSUMER-API-KEY": COMPOSIO_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if _mcp_session_id:
+        headers["Mcp-Session-Id"] = _mcp_session_id
+    body = {"jsonrpc": "2.0", "id": _mcp_request_id, "method": method}
+    if params is not None:
+        body["params"] = params
+    r = requests.post(COMPOSIO_MCP_URL, headers=headers, json=body, timeout=60)
+    r.raise_for_status()
+    if not _mcp_session_id and "mcp-session-id" in r.headers:
+        _mcp_session_id = r.headers["mcp-session-id"]
+    # requests adivina mal el charset de la respuesta SSE (sin charset en el
+    # content-type) y corrompe acentos; se fuerza UTF-8 explicitamente.
+    text = r.content.decode("utf-8")
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            return json.loads(line[len("data:"):].strip())
+    return None
+
+
+def _mcp_ensure_session():
+    if _mcp_session_id:
+        return
+    _mcp_request("initialize", {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {"name": "pipedrive-weekly", "version": "1.0"},
+    })
+    _mcp_request("notifications/initialized")
+
+
+def composio_execute(tool_slug, arguments, _retries=3):
+    """Ejecuta una accion de Composio (Google Sheets) via el endpoint MCP,
+    reusando la conexion de Google ya autorizada en Composio — evita
+    depender de un service account de Google Cloud.
+
+    El endpoint MCP de Composio a veces devuelve una respuesta vacia/sin
+    'result' de forma transitoria; se reintenta unas pocas veces antes de
+    fallar de verdad."""
+    last_error = None
+    for attempt in range(_retries):
+        try:
+            _mcp_ensure_session()
+            resp = _mcp_request("tools/call", {
+                "name": "COMPOSIO_MULTI_EXECUTE_TOOL",
+                "arguments": {"tools": [{"tool_slug": tool_slug, "arguments": arguments}]},
+            })
+            content = resp["result"]["content"][0]["text"]
+            payload = json.loads(content)
+            if payload.get("error"):
+                raise RuntimeError(f"Composio error ({tool_slug}): {payload['error']}")
+            result = payload["data"]["results"][0]
+            response = result["response"]
+            if not response.get("successful"):
+                raise RuntimeError(f"Composio tool {tool_slug} fallo: {response}")
+            return response["data"]
+        except (KeyError, TypeError, requests.RequestException) as e:
+            last_error = e
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
+
+
+def col_letter(idx0):
+    """Indice de columna 0-based -> letra de columna (A, B, ..., Z, AA, ...)."""
+    idx = idx0 + 1
+    letters = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def sheet_get_records(sheet_name):
+    """Lee todas las filas de un tab como (header, lista de dicts), igual que
+    gspread's get_all_records()."""
+    data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+        "spreadsheet_id": QUEUE_SPREADSHEET_ID,
+        "ranges": [f"{sheet_name}!A1:Z2000"],
+    })
+    values = data["valueRanges"][0].get("values", [])
+    if not values:
+        return [], []
+    header = values[0]
+    records = []
+    for row in values[1:]:
+        row = row + [""] * (len(header) - len(row))
+        records.append(dict(zip(header, row)))
+    return header, records
 
 
 def current_week_monday():
@@ -135,13 +235,13 @@ def current_week_monday():
     return today - timedelta(days=today.weekday())
 
 
-def load_rotation_map(sh):
+def load_rotation_map():
     """Lee el tab Rotacion una sola vez y arma {(semana_inicio, territorio): owner_id}.
     La rotacion semanal (quien cubre cada territorio) se mantiene manualmente en
     ese tab a partir del deck de rotacion del equipo."""
-    ws = sh.worksheet(ROTATION_TAB)
+    _, records = sheet_get_records(ROTATION_TAB)
     rotation_map = {}
-    for row in ws.get_all_records():
+    for row in records:
         semana = str(row.get("semana_inicio", "")).strip()
         try:
             territorio = int(row.get("territorio"))
@@ -382,16 +482,11 @@ def main():
         print("MODO TEST: solo lectura, no se escribe nada en Pipedrive ni en la hoja")
     print(f"{'='*60}\n")
 
-    sh = get_sheet()
-    ws = sh.worksheet(QUEUE_TAB)
-    records = ws.get_all_records()
-    rotation_map = load_rotation_map(sh)
+    header, records = sheet_get_records(QUEUE_TAB)
+    rotation_map = load_rotation_map()
 
     pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
     print(f"Filas pendientes: {len(pending)}\n")
-
-    header = ws.row_values(1)
-    col = {name: idx + 1 for idx, name in enumerate(header)}
 
     stats = {"done": 0, "needs_review": 0, "error": 0}
 
@@ -423,12 +518,30 @@ def main():
         print(f"  -> {result['status']}" + (f" ({result['error_message']})" if result.get("error_message") else ""))
 
         if not TEST_MODE:
-            ws.update_cell(row_num, col["status"], result["status"])
-            ws.update_cell(row_num, col["processed_at"], datetime.now(timezone.utc).isoformat())
-            ws.update_cell(row_num, col["result_org_id"], result["result_org_id"])
-            ws.update_cell(row_num, col["result_person_id"], result["result_person_id"])
-            ws.update_cell(row_num, col["result_lead_id"], result["result_lead_id"])
-            ws.update_cell(row_num, col["error_message"], result["error_message"])
+            status_col = col_letter(header.index("status"))
+            composio_execute("GOOGLESHEETS_VALUES_UPDATE", {
+                "spreadsheet_id": QUEUE_SPREADSHEET_ID,
+                "range": f"{QUEUE_TAB}!{status_col}{row_num}",
+                "valueInputOption": "RAW",
+                "values": [[result["status"]]],
+            })
+            # processed_at, result_org_id, result_person_id, result_lead_id,
+            # error_message son columnas contiguas en ese orden en el header.
+            start_idx = header.index("processed_at")
+            start_col = col_letter(start_idx)
+            end_col = col_letter(start_idx + 4)
+            composio_execute("GOOGLESHEETS_VALUES_UPDATE", {
+                "spreadsheet_id": QUEUE_SPREADSHEET_ID,
+                "range": f"{QUEUE_TAB}!{start_col}{row_num}:{end_col}{row_num}",
+                "valueInputOption": "RAW",
+                "values": [[
+                    datetime.now(timezone.utc).isoformat(),
+                    result["result_org_id"],
+                    result["result_person_id"],
+                    result["result_lead_id"],
+                    result["error_message"],
+                ]],
+            })
 
     print(f"\n{'='*60}")
     print(f"Resumen: {stats.get('done', 0)} completadas, {stats.get('needs_review', 0)} necesitan revision, "
