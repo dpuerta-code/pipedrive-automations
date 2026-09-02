@@ -2,7 +2,9 @@ name: Lead Queue Processor
 
 on:
   schedule:
-    - cron: "7 * * * *"   # cada hora aprox (minuto 7, para no coincidir con otros crons)
+    # Cada 15 min, lunes a viernes, 8am-5pm hora Colombia (UTC-5, sin DST)
+    # => 13:00-22:00 UTC.
+    - cron: "*/15 13-22 * * 1-5"
   workflow_dispatch:
     inputs:
       test_mode:
@@ -21,11 +23,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install requests gspread
+      - run: pip install requests
 
       - name: Ejecutar Lead Queue Processor
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
-          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
         run: python lead_queue_processor.py
