@@ -111,7 +111,7 @@ ORGANIC_GOOGLE_ROTATION_ENABLED = True
 # y le toca a Manoella (primera de ORGANIC_GOOGLE_ROTATION); de ahi en
 # adelante la rotacion sigue normal para siempre, no hace falta tocar esto
 # de nuevo.
-ORGANIC_GOOGLE_ROTATION_RESET_AT = "2026-08-27T21:01:52Z"
+ORGANIC_GOOGLE_ROTATION_RESET_AT = "2026-09-01T21:35:49Z"
 
 # Orden fijo pedido por el usuario para deals de canal organic/google -- NO
 # pasa por el balanceo de carga ni por disponibilidad, es un round robin
