@@ -396,6 +396,10 @@ def main():
     email_org_ids = fetch_recent_email_org_ids()
     contacted_org_ids = activity_org_ids | email_org_ids
     print(f"Orgs con contacto real en los ultimos {LOOKBACK_DAYS} dias (whatsapp/aircall/email): {len(contacted_org_ids)}")
+    print(f"[DEBUG] activity_org_ids={len(activity_org_ids)} email_org_ids={len(email_org_ids)}")
+    roster_ids = {int(r["org_id"]) for r in roster}
+    print(f"[DEBUG] overlap roster<->activity: {sorted(roster_ids & activity_org_ids)[:20]}")
+    print(f"[DEBUG] overlap roster<->email: {sorted(roster_ids & email_org_ids)[:20]}")
 
     created = 0
     skipped_existing = 0
