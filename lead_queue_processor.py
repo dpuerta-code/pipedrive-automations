@@ -14,6 +14,10 @@ Procesa la cola de clicks del dashboard de Metabase (tab "Sheet1" de la hoja
   nuevo, Contacto_Estado = 'New', cuando NO se quiere mandar a campaña
   todavia): busca o crea la Persona dentro de la organizacion existente y
   crea el Lead del programa, pero nunca marca "Campaing".
+- "empresa_no_sirve": borra TODAS las filas de esa empresa (`sheet_company`)
+  en el Sheet1 de Motor BDR ("Prospección Slang") — no toca Pipedrive.
+- "persona_no_sirve": borra solo la fila del contacto (`sheet_company` +
+  `email`) en el Sheet1 de Motor BDR — no toca Pipedrive.
 
 No depende de ClickHouse — solo Pipedrive API + Google Sheets vía Composio
 (reusa la conexion de Google ya autorizada en Composio, sin necesitar un
@@ -39,6 +43,11 @@ COMPOSIO_MCP_URL = "https://connect.composio.dev/mcp"
 QUEUE_SPREADSHEET_ID = "1g2MVl8H17gTtmSMKPZKypPIXRwRCIboMYZycFLH9VnY"
 QUEUE_TAB = "Sheet1"
 ROTATION_TAB = "Rotacion"
+
+# Sheet1 del Motor BDR ("Prospección Slang") - de aca se borran filas cuando
+# se marca "empresa_no_sirve" / "persona_no_sirve" desde Metabase.
+MOTOR_BDR_SPREADSHEET_ID = "1PbYdJeXAXzdJXIiIbaIAjrtA5HjtveKS-ik9s1PdOms"
+MOTOR_BDR_TAB = "Sheet1"
 
 # Owner de un Lead cuando su territorio no tiene nadie asignado esa semana
 # en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
@@ -514,6 +523,87 @@ def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
+def find_motor_bdr_rows(sheet_company, email=None):
+    """Devuelve los numeros de fila (1-indexed, incluye el header) del Sheet1
+    de Motor BDR que matchean `sheet_company` (columna B) y, si se da,
+    tambien `email` (columna H) exacto. Sin email, matchea TODAS las filas
+    de esa empresa (los 2 contactos)."""
+    header, records = sheet_get_records_from(MOTOR_BDR_SPREADSHEET_ID, MOTOR_BDR_TAB)
+    target_company = (sheet_company or "").strip().lower()
+    target_email = (email or "").strip().lower()
+    rows = []
+    for i, row in enumerate(records):
+        if (row.get("Empresa") or "").strip().lower() != target_company:
+            continue
+        if target_email and (row.get("Email") or "").strip().lower() != target_email:
+            continue
+        rows.append(i + 2)  # +2: header en fila 1, records es 0-indexed
+    return rows
+
+
+def sheet_get_records_from(spreadsheet_id, sheet_name):
+    """Igual que sheet_get_records pero contra un spreadsheet_id arbitrario
+    (Motor BDR vive en una hoja distinta a la Cola de Leads)."""
+    data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+        "spreadsheet_id": spreadsheet_id,
+        "ranges": [f"{sheet_name}!A1:AC2000"],
+    })
+    values = data["valueRanges"][0].get("values", [])
+    if not values:
+        return [], []
+    header = values[0]
+    records = []
+    for row in values[1:]:
+        row = row + [""] * (len(header) - len(row))
+        records.append(dict(zip(header, row)))
+    return header, records
+
+
+def delete_motor_bdr_rows(row_numbers):
+    """Borra filas completas del Sheet1 de Motor BDR. Recibe numeros de fila
+    1-indexed (con header); borra de mayor a menor para que el corrimiento de
+    indices de una fila borrada no afecte a las siguientes."""
+    for row_num in sorted(set(row_numbers), reverse=True):
+        composio_execute("GOOGLESHEETS_DELETE_DIMENSION", {
+            "spreadsheet_id": MOTOR_BDR_SPREADSHEET_ID,
+            "sheet_name": MOTOR_BDR_TAB,
+            "dimension": "ROWS",
+            "start_index": row_num - 1,
+            "end_index": row_num,
+        })
+
+
+def process_empresa_no_sirve(row):
+    sheet_company = row.get("sheet_company", "")
+    row_numbers = find_motor_bdr_rows(sheet_company)
+    if not row_numbers:
+        return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+                "error_message": f"'{sheet_company}' no aparece en Sheet1 de Motor BDR (nada que borrar)."}
+    if TEST_MODE:
+        print(f"    [TEST] borraria {len(row_numbers)} fila(s) de '{sheet_company}' en Motor BDR Sheet1: {row_numbers}")
+        return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+                "error_message": f"[TEST] {len(row_numbers)} fila(s) a borrar"}
+    delete_motor_bdr_rows(row_numbers)
+    return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+            "error_message": f"Borradas {len(row_numbers)} fila(s) de Motor BDR Sheet1"}
+
+
+def process_persona_no_sirve(row):
+    sheet_company = row.get("sheet_company", "")
+    email = row.get("email", "")
+    row_numbers = find_motor_bdr_rows(sheet_company, email=email)
+    if not row_numbers:
+        return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+                "error_message": f"Contacto '{email}' de '{sheet_company}' no aparece en Sheet1 de Motor BDR (nada que borrar)."}
+    if TEST_MODE:
+        print(f"    [TEST] borraria {len(row_numbers)} fila(s) de contacto '{email}' ({sheet_company}) en Motor BDR Sheet1: {row_numbers}")
+        return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+                "error_message": f"[TEST] {len(row_numbers)} fila(s) a borrar"}
+    delete_motor_bdr_rows(row_numbers)
+    return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
+            "error_message": f"Borradas {len(row_numbers)} fila(s) de Motor BDR Sheet1"}
+
+
 def main():
     print(f"\n{'='*60}")
     print("Lead Queue Processor")
@@ -548,6 +638,10 @@ def main():
                 result = process_create_org_lead(row, rotation_map)
             elif action == "create_lead_no_campaign":
                 result = process_create_lead_no_campaign(row, rotation_map)
+            elif action == "empresa_no_sirve":
+                result = process_empresa_no_sirve(row)
+            elif action == "persona_no_sirve":
+                result = process_persona_no_sirve(row)
             else:
                 result = {"status": "error", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
                           "error_message": f"action desconocida: {action}"}
