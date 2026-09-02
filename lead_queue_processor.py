@@ -10,6 +10,10 @@ Procesa la cola de clicks del dashboard de Metabase (tab "Sheet1" de la hoja
   contacto; si no encuentra ninguno, crea Organizacion -> Persona -> Lead.
   Si encuentra un posible duplicado, deja la fila en 'needs_review' sin
   crear nada. Al Lead resultante tambien se le marca "Campaing" = Yes.
+- "create_lead_no_campaign" (orgs Coverage ya matcheadas con un contacto
+  nuevo, Contacto_Estado = 'New', cuando NO se quiere mandar a campaña
+  todavia): busca o crea la Persona dentro de la organizacion existente y
+  crea el Lead del programa, pero nunca marca "Campaing".
 
 No depende de ClickHouse — solo Pipedrive API + Google Sheets vía Composio
 (reusa la conexion de Google ya autorizada en Composio, sin necesitar un
@@ -427,6 +431,41 @@ def process_mark_campaign(row, rotation_map):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
+def process_create_lead_no_campaign(row, rotation_map):
+    """Para orgs Coverage ya matcheadas con un contacto nuevo (Contacto_Estado
+    = 'New') cuando NO se quiere mandar a campaña todavia: busca o crea la
+    Persona dentro de la organizacion existente y crea el Lead del programa,
+    pero nunca marca Campaing (a diferencia de 'mark_campaign')."""
+    org_id = int(row["org_id"])
+    sheet_company = row["sheet_company"]
+    contact_nombre = row.get("contact_nombre", "")
+    email = row.get("email", "")
+    telefono = row.get("telefono", "")
+    cargo = row.get("cargo", "")
+    linkedin = row.get("linkedin", "")
+    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+
+    existing_lead = existing_program_lead(org_id)
+    if existing_lead:
+        return {
+            "status": "done", "result_org_id": org_id, "result_person_id": existing_lead.get("person_id"),
+            "result_lead_id": existing_lead["id"],
+            "error_message": "Ya existia un Lead del programa para esta org (no se toco Campaing)",
+        }
+
+    person_id = find_existing_person(contact_nombre, email, org_id)
+
+    if TEST_MODE:
+        print(f"    [TEST] {'usaria persona existente' if person_id else 'crearia Persona'} '{contact_nombre}' y Lead para org {org_id} ('{sheet_company}') con owner {owner_id}, SIN marcar Campaing.")
+        return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": "", "error_message": ""}
+
+    if not person_id:
+        person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
+
+    lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
+    return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
+
+
 def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
     """Crea Organizacion + Persona + Lead (con chequeo de duplicados).
     mark_campaign_after=True se usa cuando esta creacion se disparo desde el
@@ -507,6 +546,8 @@ def main():
                     result = process_mark_campaign(row, rotation_map)
             elif action == "create_org_lead":
                 result = process_create_org_lead(row, rotation_map)
+            elif action == "create_lead_no_campaign":
+                result = process_create_lead_no_campaign(row, rotation_map)
             else:
                 result = {"status": "error", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
                           "error_message": f"action desconocida: {action}"}
