@@ -14,10 +14,16 @@ Procesa la cola de clicks del dashboard de Metabase (tab "Sheet1" de la hoja
   nuevo, Contacto_Estado = 'New', cuando NO se quiere mandar a campaña
   todavia): busca o crea la Persona dentro de la organizacion existente y
   crea el Lead del programa, pero nunca marca "Campaing".
-- "empresa_no_sirve": borra TODAS las filas de esa empresa (`sheet_company`)
-  en el Sheet1 de Motor BDR ("Prospección Slang") — no toca Pipedrive.
-- "persona_no_sirve": borra solo la fila del contacto (`sheet_company` +
-  `email`) en el Sheet1 de Motor BDR — no toca Pipedrive.
+- "empresa_no_sirve": marca TODAS las filas de esa empresa (`sheet_company`,
+  todos sus contactos) en el Sheet1 de Motor BDR ("Prospección Slang") con
+  una nota en la columna Empresa_No_Sirve. No borra nada ni toca Pipedrive —
+  el siguiente resync manual a ClickHouse propaga la nota y la query de
+  Metabase excluye la organización completa.
+- "persona_no_sirve": marca solo la fila del contacto (`sheet_company` +
+  `email`) con una nota en la columna Persona_No_Sirve del Sheet1 de Motor
+  BDR. No borra nada ni afecta a los demás contactos de esa empresa — el
+  siguiente resync a ClickHouse hace que la query de Metabase excluya
+  únicamente ese contacto.
 
 No depende de ClickHouse — solo Pipedrive API + Google Sheets vía Composio
 (reusa la conexion de Google ya autorizada en Composio, sin necesitar un
@@ -523,30 +529,12 @@ def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def find_motor_bdr_rows(sheet_company, email=None):
-    """Devuelve los numeros de fila (1-indexed, incluye el header) del Sheet1
-    de Motor BDR que matchean `sheet_company` (columna B) y, si se da,
-    tambien `email` (columna H) exacto. Sin email, matchea TODAS las filas
-    de esa empresa (los 2 contactos)."""
-    header, records = sheet_get_records_from(MOTOR_BDR_SPREADSHEET_ID, MOTOR_BDR_TAB)
-    target_company = (sheet_company or "").strip().lower()
-    target_email = (email or "").strip().lower()
-    rows = []
-    for i, row in enumerate(records):
-        if (row.get("Empresa") or "").strip().lower() != target_company:
-            continue
-        if target_email and (row.get("Email") or "").strip().lower() != target_email:
-            continue
-        rows.append(i + 2)  # +2: header en fila 1, records es 0-indexed
-    return rows
-
-
 def sheet_get_records_from(spreadsheet_id, sheet_name):
     """Igual que sheet_get_records pero contra un spreadsheet_id arbitrario
     (Motor BDR vive en una hoja distinta a la Cola de Leads)."""
     data = composio_execute("GOOGLESHEETS_BATCH_GET", {
         "spreadsheet_id": spreadsheet_id,
-        "ranges": [f"{sheet_name}!A1:AC2000"],
+        "ranges": [f"{sheet_name}!A1:AE2000"],
     })
     values = data["valueRanges"][0].get("values", [])
     if not values:
@@ -559,49 +547,71 @@ def sheet_get_records_from(spreadsheet_id, sheet_name):
     return header, records
 
 
-def delete_motor_bdr_rows(row_numbers):
-    """Borra filas completas del Sheet1 de Motor BDR. Recibe numeros de fila
-    1-indexed (con header); borra de mayor a menor para que el corrimiento de
-    indices de una fila borrada no afecte a las siguientes."""
-    for row_num in sorted(set(row_numbers), reverse=True):
-        composio_execute("GOOGLESHEETS_DELETE_DIMENSION", {
+NO_SIRVE_NOTE = "No sirve - excluido"
+
+
+def mark_motor_bdr_note(header, row_numbers, column_name, note):
+    """Escribe `note` en la columna `column_name` (ej. Empresa_No_Sirve /
+    Persona_No_Sirve) para cada fila en `row_numbers` del Sheet1 de Motor BDR.
+    No borra nada — solo deja la nota para que el proximo resync a ClickHouse
+    la recoja y la query de Metabase excluya esa(s) fila(s)."""
+    col = col_letter(header.index(column_name))
+    for row_num in sorted(set(row_numbers)):
+        composio_execute("GOOGLESHEETS_VALUES_UPDATE", {
             "spreadsheet_id": MOTOR_BDR_SPREADSHEET_ID,
-            "sheet_name": MOTOR_BDR_TAB,
-            "dimension": "ROWS",
-            "start_index": row_num - 1,
-            "end_index": row_num,
+            "range": f"{MOTOR_BDR_TAB}!{col}{row_num}",
+            "value_input_option": "RAW",
+            "values": [[note]],
         })
 
 
 def process_empresa_no_sirve(row):
+    """Marca TODAS las filas de esa empresa (todos sus contactos) en Sheet1
+    de Motor BDR con la nota en la columna Empresa_No_Sirve. No borra nada —
+    el proximo resync a ClickHouse propaga la nota y la query de Metabase
+    excluye la organizacion completa (junto con todos sus contactos)."""
     sheet_company = row.get("sheet_company", "")
-    row_numbers = find_motor_bdr_rows(sheet_company)
+    header, records = sheet_get_records_from(MOTOR_BDR_SPREADSHEET_ID, MOTOR_BDR_TAB)
+    target = sheet_company.strip().lower()
+    row_numbers = [i + 2 for i, r in enumerate(records) if (r.get("Empresa") or "").strip().lower() == target]
     if not row_numbers:
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-                "error_message": f"'{sheet_company}' no aparece en Sheet1 de Motor BDR (nada que borrar)."}
+                "error_message": f"'{sheet_company}' no aparece en Sheet1 de Motor BDR (nada que marcar)."}
     if TEST_MODE:
-        print(f"    [TEST] borraria {len(row_numbers)} fila(s) de '{sheet_company}' en Motor BDR Sheet1: {row_numbers}")
+        print(f"    [TEST] marcaria Empresa_No_Sirve en {len(row_numbers)} fila(s) de '{sheet_company}': {row_numbers}")
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-                "error_message": f"[TEST] {len(row_numbers)} fila(s) a borrar"}
-    delete_motor_bdr_rows(row_numbers)
+                "error_message": f"[TEST] {len(row_numbers)} fila(s) a marcar"}
+    mark_motor_bdr_note(header, row_numbers, "Empresa_No_Sirve", NO_SIRVE_NOTE)
     return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-            "error_message": f"Borradas {len(row_numbers)} fila(s) de Motor BDR Sheet1"}
+            "error_message": f"Marcadas {len(row_numbers)} fila(s) (empresa completa) en Motor BDR Sheet1"}
 
 
 def process_persona_no_sirve(row):
+    """Marca SOLO la fila de ese contacto (sheet_company + email) en Sheet1
+    de Motor BDR con la nota en la columna Persona_No_Sirve. No borra nada,
+    no toca las demas filas/contactos de la misma empresa — el proximo
+    resync a ClickHouse propaga la nota y la query de Metabase excluye
+    unicamente ese contacto."""
     sheet_company = row.get("sheet_company", "")
     email = row.get("email", "")
-    row_numbers = find_motor_bdr_rows(sheet_company, email=email)
+    header, records = sheet_get_records_from(MOTOR_BDR_SPREADSHEET_ID, MOTOR_BDR_TAB)
+    target_company = sheet_company.strip().lower()
+    target_email = email.strip().lower()
+    row_numbers = [
+        i + 2 for i, r in enumerate(records)
+        if (r.get("Empresa") or "").strip().lower() == target_company
+        and (r.get("Email") or "").strip().lower() == target_email
+    ]
     if not row_numbers:
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-                "error_message": f"Contacto '{email}' de '{sheet_company}' no aparece en Sheet1 de Motor BDR (nada que borrar)."}
+                "error_message": f"Contacto '{email}' de '{sheet_company}' no aparece en Sheet1 de Motor BDR (nada que marcar)."}
     if TEST_MODE:
-        print(f"    [TEST] borraria {len(row_numbers)} fila(s) de contacto '{email}' ({sheet_company}) en Motor BDR Sheet1: {row_numbers}")
+        print(f"    [TEST] marcaria Persona_No_Sirve en {len(row_numbers)} fila(s) de contacto '{email}' ({sheet_company}): {row_numbers}")
         return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-                "error_message": f"[TEST] {len(row_numbers)} fila(s) a borrar"}
-    delete_motor_bdr_rows(row_numbers)
+                "error_message": f"[TEST] {len(row_numbers)} fila(s) a marcar"}
+    mark_motor_bdr_note(header, row_numbers, "Persona_No_Sirve", NO_SIRVE_NOTE)
     return {"status": "done", "result_org_id": "", "result_person_id": "", "result_lead_id": "",
-            "error_message": f"Borradas {len(row_numbers)} fila(s) de Motor BDR Sheet1"}
+            "error_message": f"Marcada(s) {len(row_numbers)} fila(s) (solo este contacto) en Motor BDR Sheet1"}
 
 
 def main():
