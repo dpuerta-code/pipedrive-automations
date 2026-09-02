@@ -43,6 +43,19 @@ LEAD_MARKER = "Prospección Claude"
 # en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
 FALLBACK_OWNER_ID = 22926796  # Sofia Puerta (d.puerta@slangapp.com)
 
+# BDRs del programa de prospeccion (las mismas 7 personas que rotan por los
+# territorios). El "contacto real" solo cuenta si lo hizo alguien de esta
+# lista — no cualquier usuario de Pipedrive.
+BDR_USER_IDS = {
+    27766675,  # Lina Pérez
+    25168321,  # Valentina Martin Clavijo
+    25308725,  # Lizeth Castro
+    25594802,  # Adriana
+    24675455,  # María Alejandra Camacho
+    27766664,  # Carlos Cerquera
+    22793685,  # Angie Rozo
+}
+
 # Custom fields de Persona usados al crear una persona nueva.
 PERSON_TITLE_FIELD_KEY = "41d5b08c11bf325cc294e741f13f41a8bb8b4e7a"
 PERSON_LINKEDIN_FIELD_KEY = "70ea681b6702a4b11010edee026c1b4ebfd10f71"
@@ -238,6 +251,10 @@ def fetch_recent_activity_org_ids(person_cache):
             })
             data = resp.get("data") or []
             for a in data:
+                activity_user = a.get("user_id")
+                activity_user_id = activity_user.get("value") if isinstance(activity_user, dict) else activity_user
+                if activity_user_id not in BDR_USER_IDS:
+                    continue
                 org_id = a.get("org_id")
                 if not org_id:
                     person_id = a.get("person_id")
@@ -261,7 +278,10 @@ def fetch_recent_activity_org_ids(person_cache):
 
 
 def fetch_recent_email_org_ids():
-    """org_id -> True si alguna persona de esa org tiene last_outgoing_mail_time reciente."""
+    """org_id -> True si alguna persona de esa org, cuyo dueno en Pipedrive es
+    un BDR del programa, tiene last_outgoing_mail_time reciente. owner_id de
+    la Persona es el mejor proxy disponible en la API a "quien la contacto",
+    ya que el endpoint de Personas no expone el remitente real del correo."""
     cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
     org_ids = set()
     start = 0
@@ -269,6 +289,10 @@ def fetch_recent_email_org_ids():
         resp = api_get("persons", {"limit": 500, "start": start})
         data = resp.get("data") or []
         for p in data:
+            owner = p.get("owner_id")
+            owner_id = owner.get("value") if isinstance(owner, dict) else owner
+            if owner_id not in BDR_USER_IDS:
+                continue
             mail_time = p.get("last_outgoing_mail_time")
             org = p.get("org_id")
             org_id = org.get("value") if isinstance(org, dict) else org
