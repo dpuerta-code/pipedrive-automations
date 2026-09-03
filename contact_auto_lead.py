@@ -107,6 +107,15 @@ def api_post(endpoint, data):
     return r.json()
 
 
+def api_put(endpoint, data):
+    """El endpoint /persons de esta cuenta (API v1 vieja) no acepta PATCH
+    ("Unknown method .") — hay que usar PUT para actualizar."""
+    rate_limit()
+    r = requests.put(f"{BASE_URL}/{endpoint}", params={"api_token": API_TOKEN}, json=data, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
 _mcp_session_id = None
 _mcp_request_id = 0
 
@@ -311,12 +320,47 @@ def fetch_recent_email_org_ids():
     return org_ids
 
 
-def existing_program_lead(org_id):
+def existing_program_lead(org_id, person_id=None):
+    """Busca un Lead del programa ("Prospección Claude") para esta org.
+
+    Si se pasa `person_id`, el match es por (org_id, person_id): asi, si la
+    misma organizacion tiene 2 contactos distintos con actividad real, cada
+    uno recibe su propio Lead en vez de que el segundo se salte por
+    encontrar el Lead del primero. Sin `person_id` (caso Comeback, sin
+    persona asociada), vuelve al comportamiento de "un Lead por organizacion"."""
     resp = api_get("leads", {"organization_id": org_id, "limit": 100})
-    for lead in resp.get("data") or []:
-        if LEAD_MARKER in (lead.get("title") or ""):
-            return lead
-    return None
+    matching = [l for l in (resp.get("data") or []) if LEAD_MARKER in (l.get("title") or "")]
+    if person_id is not None:
+        for lead in matching:
+            if lead.get("person_id") == person_id:
+                return lead
+        return None
+    return matching[0] if matching else None
+
+
+def enrich_existing_person(person_id, email=None, telefono=None):
+    """Si la persona ya existe, agrega el email/telefono del Roster como
+    entrada ADICIONAL (no primaria) si todavia no los tiene — nunca
+    reemplaza ni borra ningun email/telefono que ya tuviera. Esto es el
+    "actualizar, nunca duplicar" cuando ya existe un Lead para esta persona."""
+    email = email.strip() if email and email.strip().upper() not in ("N/D", "") else None
+    telefono = telefono.strip() if telefono and telefono.strip().upper() not in ("N/D", "") else None
+    if not email and not telefono:
+        return
+    resp = api_get(f"persons/{person_id}")
+    person = resp.get("data") or {}
+    update = {}
+    if email:
+        existing = [(e.get("value") or "").strip().lower() for e in (person.get("email") or [])]
+        if email.lower() not in existing:
+            update["email"] = (person.get("email") or []) + [{"value": email, "primary": False}]
+    if telefono:
+        existing = [(p.get("value") or "").strip() for p in (person.get("phone") or [])]
+        if telefono not in existing:
+            update["phone"] = (person.get("phone") or []) + [{"value": telefono, "primary": False}]
+    if not update:
+        return
+    api_put(f"persons/{person_id}", update)
 
 
 def find_person_in_org_by_name(name, org_id):
@@ -398,7 +442,7 @@ def main():
     print(f"Orgs con contacto real en los ultimos {LOOKBACK_DAYS} dias (whatsapp/aircall/email): {len(contacted_org_ids)}")
 
     created = 0
-    skipped_existing = 0
+    updated_existing = 0
     skipped_no_contact = 0
     errors = 0
 
@@ -418,23 +462,32 @@ def main():
             continue
 
         try:
-            if existing_program_lead(org_id):
-                skipped_existing += 1
-                continue
-
             if TEST_MODE:
                 if org_category == "Coverage":
-                    print(f"  [TEST] '{sheet_company}' (org {org_id}, Coverage): buscaria/crearia Persona '{contact_nombre}' <{email}>, luego crearia Lead.")
+                    print(f"  [TEST] '{sheet_company}' (org {org_id}, Coverage): buscaria/crearia Persona '{contact_nombre}' <{email}>, luego revisaria si ya hay Lead para ESA persona (actualizar) o lo crearia.")
                 else:
-                    print(f"  [TEST] '{sheet_company}' (org {org_id}, {org_category}): crearia Lead ligado solo a organization_id.")
+                    print(f"  [TEST] '{sheet_company}' (org {org_id}, {org_category}): revisaria si ya hay Lead para la org o lo crearia, ligado solo a organization_id.")
                 created += 1
                 continue
 
+            # Resolver la persona ANTES de chequear el Lead existente, para
+            # poder buscar/actualizar por (org_id, person_id) y no solo por
+            # organization_id — asi 2 contactos reales distintos de la
+            # misma org reciben cada uno su propio Lead, y el mismo contacto
+            # detectado de nuevo en una corrida posterior actualiza en vez
+            # de duplicar.
             person_id = None
             if org_category == "Coverage":
                 person_id = find_existing_person(contact_nombre, email, org_id)
                 if not person_id:
                     person_id = create_person(contact_nombre, email, org_id, telefono, cargo, linkedin)
+
+            existing_lead = existing_program_lead(org_id, person_id)
+            if existing_lead:
+                if person_id:
+                    enrich_existing_person(person_id, email, telefono)
+                updated_existing += 1
+                continue
 
             lead_id = create_lead(sheet_company, org_id, person_id, owner_id)
             print(f"  '{sheet_company}' (org {org_id}): Lead creado (id {lead_id}) por contacto real detectado.")
@@ -444,7 +497,7 @@ def main():
             errors += 1
 
     print(f"\n{'='*60}")
-    print(f"Resumen: {created} leads creados, {skipped_existing} ya tenian lead del programa, "
+    print(f"Resumen: {created} leads creados, {updated_existing} ya tenian lead para esa persona (actualizados, no duplicados), "
           f"{skipped_no_contact} sin contacto reciente, {errors} errores")
     print(f"{'='*60}\n")
 
