@@ -63,6 +63,9 @@ LEAD_MARKER = "Prospección Claude"
 CAMPAING_FIELD_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
 CAMPAING_YES = 1453
 
+# Campo nativo de Leads "Source channel" (enum) -> opcion "Org Scoring".
+CHANNEL_ORG_SCORING = 1431
+
 # Custom fields de Organizacion usados al crear una org nueva ("Posible New").
 ORG_COUNTRY_FIELD_KEY = "6ba492e23a1d6df40dd0a1127247411b49e617f7"
 ORG_HEAD_INDUSTRY_FIELD_KEY = "2d05783a484e441a0aa07224d4263573fb2e11d7"
@@ -471,7 +474,7 @@ def enrich_existing_org(org_id, domain=None, website=None, org_linkedin=None, co
 
 
 def create_lead(sheet_company, org_id, person_id=None, owner_id=None):
-    body = {"title": f"{sheet_company} - {LEAD_MARKER}", "organization_id": org_id}
+    body = {"title": f"{sheet_company} - {LEAD_MARKER}", "organization_id": org_id, "channel": CHANNEL_ORG_SCORING}
     if person_id:
         body["person_id"] = person_id
     if owner_id:

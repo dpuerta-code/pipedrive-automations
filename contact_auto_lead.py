@@ -39,6 +39,9 @@ ROTATION_TAB = "Rotacion"
 
 LEAD_MARKER = "Prospección Claude"
 
+# Campo nativo de Leads "Source channel" (enum) -> opcion "Org Scoring".
+CHANNEL_ORG_SCORING = 1431
+
 # Owner de un Lead cuando su territorio no tiene nadie asignado esa semana
 # en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
 FALLBACK_OWNER_ID = 22926796  # Sofia Puerta (d.puerta@slangapp.com)
@@ -415,6 +418,7 @@ def create_lead(sheet_company, org_id, person_id=None, owner_id=None):
     body = {
         "title": f"{sheet_company} - {LEAD_MARKER}",
         "organization_id": org_id,
+        "channel": CHANNEL_ORG_SCORING,
     }
     if person_id:
         body["person_id"] = person_id
