@@ -1,0 +1,39 @@
+name: Apollo Campaign Guard
+
+on:
+  schedule:
+    - cron: "0 9 * * *"  # Todos los dias 4am Colombia (UTC-5 -> 09:00 UTC)
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE: true = solo lectura, false = ejecuta cambios"
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Ejecutar Apollo Campaign Guard
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+          TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+        run: python apollo_campaign_guard.py
+
+      - name: Subir backup como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apollo-campaign-guard-backup-${{ github.run_id }}
+          path: apollo_campaign_guard_backup.json
+          if-no-files-found: ignore
