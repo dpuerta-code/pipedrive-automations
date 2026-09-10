@@ -146,6 +146,14 @@ def apollo_post(endpoint, json_body):
     return r.json()
 
 
+def apollo_get(endpoint, params=None):
+    rate_limit()
+    headers = {"x-api-key": APOLLO_API_KEY}
+    r = requests.get(f"{APOLLO_BASE}/{endpoint}", params=params, headers=headers, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
 def country_from_title(title):
     """Heurística por sufijo de nombre (más confiable que el campo Country, ver memoria
     project_pipedrive_logo_type_champion_ironman: casos donde Country venía mal para la org)."""
@@ -206,6 +214,47 @@ def get_organization(org_id):
     return resp.get("data") or {}
 
 
+_pipedrive_user_email_cache = {}
+
+
+def get_pipedrive_user_email(user_id):
+    if user_id in _pipedrive_user_email_cache:
+        return _pipedrive_user_email_cache[user_id]
+    email = None
+    try:
+        resp = pd_get(f"users/{user_id}")
+        email = (resp.get("data") or {}).get("email")
+    except Exception:
+        pass
+    _pipedrive_user_email_cache[user_id] = email
+    return email
+
+
+def get_apollo_mailboxes():
+    """{email: account_id} de las mailboxes conectadas en Apollo."""
+    resp = apollo_get("email_accounts")
+    return {a["email"]: a["id"] for a in resp.get("email_accounts", []) if a.get("active")}
+
+
+def resolve_sender_account_id(owner_id, apollo_mailboxes):
+    """
+    Manda desde el mailbox Apollo del owner del lead en Pipedrive. Los owners usan
+    @slangapp.com en Pipedrive; en Apollo los mailboxes de envio suelen estar en
+    @slangprogram.com con el mismo local-part (mismo patron para todos menos a.rozo,
+    que ademas tiene un mailbox exacto en @slangapp.com). Si no hay match de ningun tipo,
+    cae al mailbox default.
+    """
+    owner_email = get_pipedrive_user_email(owner_id) if owner_id else None
+    if owner_email:
+        if owner_email in apollo_mailboxes:
+            return apollo_mailboxes[owner_email], owner_email
+        local_part = owner_email.split("@", 1)[0]
+        alt_email = f"{local_part}@slangprogram.com"
+        if alt_email in apollo_mailboxes:
+            return apollo_mailboxes[alt_email], alt_email
+    return SEND_FROM_EMAIL_ACCOUNT_ID, None
+
+
 def extract_id(value):
     if isinstance(value, dict):
         return value.get("value")
@@ -240,11 +289,11 @@ def find_or_create_apollo_contact(email, full_name, org_name, typed_custom_field
     return contact.get("id")
 
 
-def add_to_sequence(contact_id, sequence_id):
+def add_to_sequence(contact_id, sequence_id, send_from_account_id):
     body = {
         "emailer_campaign_id": sequence_id,
         "contact_ids": [contact_id],
-        "send_email_from_email_account_id": SEND_FROM_EMAIL_ACCOUNT_ID,
+        "send_email_from_email_account_id": send_from_account_id,
     }
     return apollo_post(f"emailer_campaigns/{sequence_id}/add_contact_ids", body)
 
@@ -262,6 +311,13 @@ def main():
     signals = load_prospeccion_signals()
     print(f"Señales de personalización cargadas (prospeccion_signals.csv): {len(signals)}\n")
 
+    try:
+        apollo_mailboxes = get_apollo_mailboxes()
+        print(f"Mailboxes Apollo conectadas: {len(apollo_mailboxes)}\n")
+    except Exception as e:
+        print(f"ADVERTENCIA: no se pudieron listar mailboxes Apollo ({e}); se usara el default para todos\n")
+        apollo_mailboxes = {}
+
     seen_emails = set()
     stats = {"enrolled": 0, "already_active": 0, "no_sequence": 0, "logo_type_excluded": 0,
              "no_signals": 0, "no_email": 0, "duplicate": 0, "errors": 0}
@@ -271,6 +327,7 @@ def main():
         title = lead.get("title", "?")
         person_id = extract_id(lead.get("person_id"))
         org_id = extract_id(lead.get("organization_id"))
+        owner_id = extract_id(lead.get("owner_id"))
         org_category = lead.get(ORG_CAT_KEY)
         channel = lead.get(CHANNEL_KEY)
 
@@ -328,10 +385,12 @@ def main():
 
         org_name = title  # el titulo del lead ya suele llevar el nombre de la org
         full_name = person.get("name", "")
+        send_from_account_id, send_from_email = resolve_sender_account_id(owner_id, apollo_mailboxes)
 
         if TEST_MODE:
+            sender_note = f" desde {send_from_email}" if send_from_email else " desde default (sin mailbox del owner)"
             print(f"  [TEST] Enrolaria '{full_name}' <{email}> ({title}) -> secuencia {sequence_id}"
-                  f"{' (con senales)' if typed_custom_fields else ''}")
+                  f"{' (con senales)' if typed_custom_fields else ''}{sender_note}")
             stats["enrolled"] += 1
             backup.append({"lead": title, "email": email, "sequence_id": sequence_id})
             continue
@@ -342,7 +401,7 @@ def main():
                 print(f"  ERROR: no se pudo resolver contact_id para {email}")
                 stats["errors"] += 1
                 continue
-            resp = add_to_sequence(contact_id, sequence_id)
+            resp = add_to_sequence(contact_id, sequence_id, send_from_account_id)
             skipped = resp.get("skipped_contact_ids") or {}
             if contact_id in skipped:
                 print(f"  SKIP '{full_name}' <{email}>: ya activo en la secuencia ({skipped[contact_id]})")
