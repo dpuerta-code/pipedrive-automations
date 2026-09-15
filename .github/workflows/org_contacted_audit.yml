@@ -2,6 +2,11 @@ name: Org Contacted Audit
 
 on:
   workflow_dispatch:
+    inputs:
+      scope_days:
+        description: "SCOPE_DAYS: solo orgs con Prospection Date en los últimos N días (default 30)"
+        required: false
+        default: "30"
 
 jobs:
   run:
@@ -19,4 +24,5 @@ jobs:
       - name: Ejecutar auditoría de First Contact Date
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          SCOPE_DAYS: ${{ github.event.inputs.scope_days || '30' }}
         run: python org_contacted_audit.py
