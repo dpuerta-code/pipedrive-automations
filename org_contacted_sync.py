@@ -25,6 +25,7 @@ TEST_MODE=true → solo procesa hasta MAX_LEADS_TEST_MODE leads pendientes
 Cron GitHub Actions: lunes-viernes 10am, 1:30pm y 6pm Colombia
 """
 
+import json
 import os
 import requests
 import time
@@ -32,6 +33,13 @@ from datetime import datetime, date, timedelta
 
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
+
+# ClickHouse — para caché de owners (detección de cambios de dueño)
+CH_HOST = os.environ.get("CLICKHOUSE_HOST", "sql-clickhouse.clickhouse.com")
+CH_PORT = os.environ.get("CLICKHOUSE_PORT", "8443")
+CH_USER = os.environ.get("CLICKHOUSE_USER", "s_puerta")
+CH_PASS = os.environ.get("CLICKHOUSE_PASSWORD", "")
+CH_ENABLED = bool(CH_PASS)  # si no hay contraseña, se desactiva el caché
 
 # Campos de lead
 PROSPECTION_DATE_KEY = "2db7aeb0017118ae0c5f9284887c0d55482bbce9"  # Prospection Date
@@ -70,6 +78,63 @@ MAX_LEADS_TEST_MODE = 5
 
 request_count = 0
 window_start = time.time()
+
+
+# ── ClickHouse helpers ──────────────────────────────────────────────────────
+
+def ch_query(sql):
+    r = requests.post(
+        f"https://{CH_HOST}:{CH_PORT}/",
+        params={"query": sql},
+        auth=(CH_USER, CH_PASS),
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.text
+
+
+def ch_insert(rows):
+    if not rows:
+        return
+    body = "\n".join(json.dumps(row) for row in rows)
+    r = requests.post(
+        f"https://{CH_HOST}:{CH_PORT}/",
+        params={"query": "INSERT INTO bpa.lead_owner_cache FORMAT JSONEachRow"},
+        auth=(CH_USER, CH_PASS),
+        data=body.encode(),
+        timeout=60,
+    )
+    r.raise_for_status()
+
+
+def load_owner_cache():
+    """Devuelve {lead_id_str: owner_id_int} desde ClickHouse."""
+    try:
+        text = ch_query("SELECT lead_id, owner_id FROM bpa.lead_owner_cache FINAL")
+        cache = {}
+        for line in text.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2:
+                cache[parts[0]] = int(parts[1])
+        return cache
+    except Exception as e:
+        print(f"  [owner_cache] Error cargando caché: {e}")
+        return {}
+
+
+def save_owner_cache(leads):
+    """Guarda/actualiza owner_id de todos los leads activos en ClickHouse."""
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    rows = []
+    for lead in leads:
+        owner = extract_id(lead.get("owner_id"))
+        if owner:
+            rows.append({"lead_id": str(lead["id"]), "owner_id": int(owner), "updated_at": now})
+    try:
+        ch_insert(rows)
+        print(f"  [owner_cache] {len(rows)} entradas guardadas en ClickHouse")
+    except Exception as e:
+        print(f"  [owner_cache] Error guardando caché: {e}")
 
 
 def rate_limit():
@@ -264,6 +329,62 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
     return min(qualifying) if qualifying else None
 
 
+def reset_on_owner_change(active_leads, org_cache, owner_cache):
+    """Paso 0: detecta leads cuyo owner cambió desde la última corrida.
+    Para cada uno: limpia el CONTACT_DATE_KEY del lead y el FCD de su org,
+    para que Paso 2 los revalúe con el nuevo owner.
+    Solo actúa si el lead ya tenía FCD (leads pendientes no necesitan reset).
+    """
+    resets = 0
+    seen_orgs = set()
+    for lead in active_leads:
+        if not lead.get(CONTACT_DATE_KEY):
+            continue  # pendiente → Paso 2 se encarga, no necesita reset
+        lead_id = str(lead["id"])
+        current_owner = extract_id(lead.get("owner_id"))
+        cached_owner = owner_cache.get(lead_id)
+        if cached_owner is None or cached_owner == current_owner:
+            continue  # primera vez o sin cambio
+
+        org_id = lead["organization_id"]
+        title = lead.get("title", "?")
+        print(f"  Owner cambió en lead '{title}' ({lead_id}): {cached_owner} → {current_owner}")
+
+        if not TEST_MODE:
+            # Limpiar FCD del lead
+            try:
+                api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: None})
+            except Exception as e:
+                print(f"    ERROR limpiando FCD del lead: {e}")
+                continue
+
+            # Limpiar FCD de la org (solo una vez por org por corrida)
+            if org_id not in seen_orgs:
+                seen_orgs.add(org_id)
+                if org_id not in org_cache:
+                    try:
+                        resp = api_get(f"organizations/{org_id}")
+                        org_cache[org_id] = resp.get("data") or {}
+                    except Exception:
+                        pass
+                if org_cache.get(org_id, {}).get(ORG_FIRST_CONTACT_KEY):
+                    try:
+                        api_put(f"organizations/{org_id}", {
+                            ORG_FIRST_CONTACT_KEY: None,
+                            ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ZERO_OPTION,
+                        })
+                        org_cache.setdefault(org_id, {})[ORG_FIRST_CONTACT_KEY] = None
+                        print(f"    FCD de org {org_id} limpiado por cambio de owner")
+                    except Exception as e:
+                        print(f"    ERROR limpiando FCD de org {org_id}: {e}")
+        else:
+            print(f"    [TEST] Limpiaría FCD del lead y de org {org_id}")
+
+        resets += 1
+
+    return resets
+
+
 def clear_stale_org_contact_dates(recent_leads, org_cache, person_cache):
     """Para orgs re-prospectadas (gap ≥60d con el FCD actual), intenta un reemplazo
     atómico: busca la nueva actividad qualifying ANTES de borrar el campo. Solo vacía
@@ -366,6 +487,21 @@ def main():
 
     org_cache = {}
     person_cache = {}
+
+    # Paso 0: detectar cambios de owner y limpiar FCD afectados
+    if CH_ENABLED:
+        print("\nPaso 0: cargando caché de owners desde ClickHouse...")
+        owner_cache = load_owner_cache()
+        print(f"  {len(owner_cache)} leads en caché")
+        owner_resets = reset_on_owner_change(active_leads, org_cache, owner_cache)
+        print(f"  Leads reseteados por cambio de owner: {owner_resets}")
+        # Re-fetch leads para reflejar los FCDs limpiados
+        if owner_resets > 0 and not TEST_MODE:
+            active_leads = get_active_leads()
+    else:
+        print("\nPaso 0: CLICKHOUSE_PASSWORD no configurado, detección de owner change desactivada")
+        owner_cache = {}
+    print()
 
     # Paso 1: para orgs re-prospectadas recientemente (gap >=60d), reemplazar FCD atómicamente
     # o limpiar si aún no hay contacto nuevo. No limpia si el gap es <60d (misma sesión).
@@ -539,6 +675,11 @@ def main():
                 print(f"  ERROR en deal org {org_id} [deal {deal_id}]: {e}")
 
     print(f"Orgs con deal actualizadas: {deal_contacted}")
+
+    # Guardar caché de owners al final
+    if CH_ENABLED and not TEST_MODE:
+        print("\nGuardando caché de owners en ClickHouse...")
+        save_owner_cache(active_leads)
 
     print(f"\n{'='*60}")
     print(f"Resumen: {stats['updated']} leads actualizados, {stats['propagated_to_org']} propagados a su org, "

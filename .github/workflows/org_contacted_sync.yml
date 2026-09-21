@@ -30,6 +30,10 @@ jobs:
       - name: Ejecutar Org Contacted Sync
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          CLICKHOUSE_HOST:     ${{ secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT:     ${{ secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER:     ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
           TEST_MODE: "false"
           BACKFILL_MODE: >-
             ${{
