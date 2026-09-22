@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Enrola en una secuencia de Apollo los Leads de Pipedrive marcados con Campaing=Yes.
+Enrola en una secuencia de Apollo todos los Leads de Pipedrive con
+Organization Category = Coverage o New (ya no se exige Campaing=Yes; ver
+memoria/PR del 2026-09-22 -- el campo Campaing se deja de usar como gate).
 
 La secuencia destino depende de "Organization Category" + "Source channel" del lead:
   - Source channel = Org Scoring:
@@ -29,7 +31,7 @@ run_dedupe=true devuelve el contacto existente si el email ya está en Apollo, y
 add_contact_ids salta (sin error) contactos que ya están activos en esa secuencia.
 
 TEST_MODE=true  -> solo lectura, no llama a Apollo (default).
-Cron GitHub Actions: martes/miércoles/jueves únicamente.
+Cron GitHub Actions: lunes a viernes.
 """
 
 import csv
@@ -46,10 +48,10 @@ APOLLO_BASE = "https://api.apollo.io/api/v1"
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 
-# Filtro Pipedrive "Campaing Yes (Apollo automation)" - creado 2026-09-09
-CAMPAING_FILTER_ID = 71499
+# Filtro Pipedrive "Org Category Coverage/New (Apollo automation)" - creado 2026-09-22.
+# Reemplaza al filtro anterior "Campaing Yes" (id 71499, ya no se usa como gate de entrada).
+ORG_CATEGORY_FILTER_ID = 71609
 
-CAMPAING_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
 ORG_CAT_KEY = "fafdb80a27427f23c8f72675767e616461f056cb"
 CHANNEL_KEY = "channel"  # campo nativo "Source channel"
 
@@ -189,11 +191,11 @@ def resolve_sequence(org_category, channel, title):
     return None, "combinacion_sin_mapeo"
 
 
-def get_campaing_leads():
+def get_eligible_leads():
     leads = []
     start = 0
     while True:
-        resp = pd_get("leads", {"filter_id": CAMPAING_FILTER_ID, "limit": 500, "start": start})
+        resp = pd_get("leads", {"filter_id": ORG_CATEGORY_FILTER_ID, "limit": 500, "start": start})
         data = resp.get("data") or []
         leads.extend(data)
         pagination = resp.get("additional_data", {}).get("pagination", {})
@@ -305,8 +307,8 @@ def main():
         print("MODO TEST: no se llamara a Apollo (solo lectura)")
     print(f"{'='*60}\n")
 
-    leads = get_campaing_leads()
-    print(f"Leads con Campaing=Yes: {len(leads)}\n")
+    leads = get_eligible_leads()
+    print(f"Leads con Organization Category Coverage/New: {len(leads)}\n")
 
     signals = load_prospeccion_signals()
     print(f"Señales de personalización cargadas (prospeccion_signals.csv): {len(signals)}\n")
