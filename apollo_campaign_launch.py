@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Enrola en una secuencia de Apollo los Leads de Pipedrive marcados con Campaing=Yes.
+Enrola en una secuencia de Apollo todos los Leads de Pipedrive con
+Organization Category = Coverage o New (ya no se exige Campaing=Yes; ver
+memoria/PR del 2026-09-22 -- el campo Campaing se deja de usar como gate).
 
 La secuencia destino depende de "Organization Category" + "Source channel" del lead:
   - Source channel = Org Scoring:
@@ -14,6 +16,11 @@ La secuencia destino depende de "Organization Category" + "Source channel" del l
 
 Ademas, se salta cualquier lead cuya organizacion tenga el campo "Logo Type" = Ironman,
 Champion o Target MX Champion (ids 313/314/1418), sin importar la categoria/canal.
+
+Se salta cualquier lead creado ANTES de LEAD_CREATED_SINCE (ver constante abajo) -- al
+quitar el gate de Campaing=Yes, el pool de leads elegibles crecio de golpe (~17-19/dia a
+~370+ en un solo run); este filtro de fecha evita re-contactar leads viejos que ya podrian
+tener historial de correos previo, limitando el primer alcance a leads recien creados.
 
 Las secuencias Motor BDR (SL·NEW y SL·REACT) usan variables de personalizacion por contacto
 ({{contact.Slang Ciudad}}, {{contact.Slang Senal}}, etc, ver plantillas en Apollo) que vienen
@@ -29,7 +36,7 @@ run_dedupe=true devuelve el contacto existente si el email ya está en Apollo, y
 add_contact_ids salta (sin error) contactos que ya están activos en esa secuencia.
 
 TEST_MODE=true  -> solo lectura, no llama a Apollo (default).
-Cron GitHub Actions: martes/miércoles/jueves únicamente.
+Cron GitHub Actions: lunes a viernes.
 """
 
 import csv
@@ -46,10 +53,14 @@ APOLLO_BASE = "https://api.apollo.io/api/v1"
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 
-# Filtro Pipedrive "Campaing Yes (Apollo automation)" - creado 2026-09-09
-CAMPAING_FILTER_ID = 71499
+# Filtro Pipedrive "Org Category Coverage/New (Apollo automation)" - creado 2026-09-22.
+# Reemplaza al filtro anterior "Campaing Yes" (id 71499, ya no se usa como gate de entrada).
+ORG_CATEGORY_FILTER_ID = 71609
 
-CAMPAING_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
+# Solo se enrolan leads creados en/despues de esta fecha (YYYY-MM-DD, se compara contra
+# add_time del lead). Evita re-contactar leads viejos ahora que no hay gate de Campaing=Yes.
+LEAD_CREATED_SINCE = os.environ.get("LEAD_CREATED_SINCE", "2026-09-18")
+
 ORG_CAT_KEY = "fafdb80a27427f23c8f72675767e616461f056cb"
 CHANNEL_KEY = "channel"  # campo nativo "Source channel"
 
@@ -189,11 +200,11 @@ def resolve_sequence(org_category, channel, title):
     return None, "combinacion_sin_mapeo"
 
 
-def get_campaing_leads():
+def get_eligible_leads():
     leads = []
     start = 0
     while True:
-        resp = pd_get("leads", {"filter_id": CAMPAING_FILTER_ID, "limit": 500, "start": start})
+        resp = pd_get("leads", {"filter_id": ORG_CATEGORY_FILTER_ID, "limit": 500, "start": start})
         data = resp.get("data") or []
         leads.extend(data)
         pagination = resp.get("additional_data", {}).get("pagination", {})
@@ -305,8 +316,8 @@ def main():
         print("MODO TEST: no se llamara a Apollo (solo lectura)")
     print(f"{'='*60}\n")
 
-    leads = get_campaing_leads()
-    print(f"Leads con Campaing=Yes: {len(leads)}\n")
+    leads = get_eligible_leads()
+    print(f"Leads con Organization Category Coverage/New: {len(leads)}\n")
 
     signals = load_prospeccion_signals()
     print(f"Señales de personalización cargadas (prospeccion_signals.csv): {len(signals)}\n")
@@ -320,7 +331,7 @@ def main():
 
     seen_emails = set()
     stats = {"enrolled": 0, "already_active": 0, "no_sequence": 0, "logo_type_excluded": 0,
-             "no_signals": 0, "no_email": 0, "duplicate": 0, "errors": 0}
+             "too_old": 0, "no_signals": 0, "no_email": 0, "duplicate": 0, "errors": 0}
     backup = []
 
     for lead in leads:
@@ -330,6 +341,11 @@ def main():
         owner_id = extract_id(lead.get("owner_id"))
         org_category = lead.get(ORG_CAT_KEY)
         channel = lead.get(CHANNEL_KEY)
+        add_time = lead.get("add_time") or ""
+
+        if add_time[:10] < LEAD_CREATED_SINCE:
+            stats["too_old"] += 1
+            continue
 
         sequence_id, skip_reason = resolve_sequence(org_category, channel, title)
         if skip_reason:
