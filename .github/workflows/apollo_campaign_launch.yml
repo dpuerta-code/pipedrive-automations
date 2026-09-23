@@ -2,7 +2,11 @@ name: Apollo Campaign Launch
 
 on:
   schedule:
-    - cron: "0 10 * * 2-4"  # Martes/Miercoles/Jueves 5am Colombia (UTC-5 -> 10:00 UTC)
+    - cron: "12 10 * * 1-5"  # Lunes-Viernes 5am Colombia (UTC-5 -> 10:12 UTC). Minuto
+      # corrido de :00 -> :12 porque GitHub retrasa/pierde crons justo en la hora exacta
+      # (hora de mas congestion en todos los runners de GitHub Actions, documentado por
+      # GitHub); el resto de los ~20 workflows de este repo tambien usan minuto :00 y
+      # varios mostraron retrasos de varias horas en su historial de corridas.
   workflow_dispatch:
     inputs:
       test_mode:

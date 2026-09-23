@@ -2,7 +2,8 @@ name: Apollo Campaign Guard
 
 on:
   schedule:
-    - cron: "0 9 * * *"  # Todos los dias 4am Colombia (UTC-5 -> 09:00 UTC)
+    - cron: "17 9 * * *"  # Todos los dias 4am Colombia (UTC-5 -> 09:17 UTC).
+      # Minuto corrido de :00 -> :17, ver nota en apollo_campaign_launch.yml.
   workflow_dispatch:
     inputs:
       test_mode:
