@@ -2,8 +2,7 @@ name: Org FCD Owner Sync
 
 on:
   schedule:
-    - cron: "0 13 * * 3"   # Miércoles 8:00am Colombia (UTC-5 → 13:00 UTC)
-    - cron: "0 0 * * 6"    # Viernes 7:00pm Colombia (UTC-5 → 00:00 UTC sábado)
+    - cron: "0 10 * * *"   # Todos los días 5:00am Colombia (UTC-5 → 10:00 UTC)
   workflow_dispatch:
 
 jobs:
