@@ -3,29 +3,24 @@
 org_fcd_owner_sync.py
 
 Detecta orgs donde el FCD pertenece a un rep anterior al owner actual:
-  - Consulta ClickHouse para obtener orgs con LPD reciente y FCD más antiguo
+  - Pagina organizations de Pipedrive para obtener candidatos con LPD reciente y FCD antiguo
   - Para cada org, compara la primera actividad calificante del owner actual vs FCD
   - Si el owner actual contactó por primera vez DESPUÉS del FCD → actualiza FCD
 
-Corre miércoles 8am y viernes 7pm (hora Colombia).
+Corre todos los días 5am hora Colombia.
 TEST_MODE=true → solo lectura.
 """
 
-import json
 import os
-import requests
 import time
+import requests
 from datetime import date, timedelta, datetime
 
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL  = "https://slang.pipedrive.com/api/v1"
 
-CH_HOST = os.environ.get("CLICKHOUSE_HOST", "sql-clickhouse.clickhouse.com")
-CH_PORT = os.environ.get("CLICKHOUSE_PORT", "8443")
-CH_USER = os.environ.get("CLICKHOUSE_USER", "s_puerta")
-CH_PASS = os.environ.get("CLICKHOUSE_PASSWORD", "")
-
 ORG_FIRST_CONTACT_KEY       = "cd5eb85596e968a2d3cdf9a8785ba1b53982ef7a"
+ORG_LAST_PROSPECTION_KEY    = "2fd7273aed05f1cbab54ec64bbdb7e5dfe69fd22"
 ORG_COUNT_FIRST_CONTACT_KEY = "e117d76508f5bdc87d55c35f3c30dacd10c6f7d9"
 ORG_COUNT_ONE_OPTION        = 1413
 ORG_COUNT_ZERO_OPTION       = 1412
@@ -76,30 +71,30 @@ def api_put_org(org_id, data):
     return r.json()
 
 
-def ch_query(sql):
-    """Ejecuta query en ClickHouse y devuelve lista de filas (como listas)."""
-    r = requests.post(
-        f"https://{CH_HOST}:{CH_PORT}",
-        params={"query": sql + " FORMAT JSONCompact"},
-        auth=(CH_USER, CH_PASS),
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json().get("data", [])
-
-
 def get_candidate_orgs(lpd_from, lpd_to, fcd_before):
-    """Obtiene org_id de ClickHouse: LPD en rango y FCD anterior al inicio."""
-    rows = ch_query(f"""
-        SELECT organization_id
-        FROM bpa.organizations_custom_fields_pivoted
-        WHERE last_prospection_date >= '{lpd_from}'
-          AND last_prospection_date <= '{lpd_to}'
-          AND first_contact_date IS NOT NULL
-          AND first_contact_date != ''
-          AND first_contact_date < '{fcd_before}'
-    """)
-    return [int(row[0]) for row in rows]
+    """
+    Pagina todas las orgs de Pipedrive y filtra:
+    LPD en [lpd_from, lpd_to] Y FCD existe Y FCD < fcd_before.
+    """
+    candidate_ids = []
+    start = 0
+    page = 0
+    while True:
+        page += 1
+        resp = api_get("organizations", {"limit": 500, "start": start})
+        orgs = resp.get("data") or []
+        for org in orgs:
+            lpd = str(org.get(ORG_LAST_PROSPECTION_KEY) or "")[:10]
+            fcd = str(org.get(ORG_FIRST_CONTACT_KEY) or "")[:10]
+            if not lpd or not fcd or len(lpd) < 10 or len(fcd) < 10:
+                continue
+            if lpd_from <= lpd <= lpd_to and fcd < fcd_before:
+                candidate_ids.append(org["id"])
+        pag = resp.get("additional_data", {}).get("pagination", {})
+        if not pag.get("more_items_in_collection"):
+            break
+        start = pag.get("next_start", start + 500)
+    return candidate_ids
 
 
 def get_org(org_id):
@@ -148,13 +143,9 @@ def main():
     print(f"TEST_MODE: {'SI (solo lectura)' if TEST_MODE else 'NO — aplicando cambios'}")
     print(f"{'='*70}\n")
 
-    if not CH_PASS:
-        print("ERROR: CLICKHOUSE_PASSWORD no configurado. Abortando.")
-        return
-
-    print("Consultando ClickHouse para candidatos...")
+    print("Buscando candidatos en Pipedrive (paginando orgs)...")
     candidate_ids = get_candidate_orgs(lpd_from, lpd_to, fcd_before)
-    print(f"Candidatos de ClickHouse: {len(candidate_ids)}\n")
+    print(f"Candidatos encontrados: {len(candidate_ids)}\n")
 
     fixes        = []
     no_activity  = []
