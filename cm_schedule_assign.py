@@ -66,6 +66,14 @@ antes de perderse), el deal se asigna al mismo CM SE que tenia ese deal
 anterior, sin pasar por el balanceo. Si ese deal anterior no tiene CM SE
 asignado, se sigue con el balanceo normal.
 
+Bloqueo temporal de CMs: un CM listado en TEMPORARILY_BLOCKED_UNTIL no
+recibe asignaciones (ni por balanceo, ni por rotacion organic/google, ni
+por continuidad) mientras la fecha actual sea <= su fecha de bloqueo. La
+excepcion 1 (autoasignacion BDR=SE) si aplica aunque este bloqueado. Si
+el CM de continuidad esta bloqueado, el deal cae al balanceo normal. En
+la rotacion organic/google se salta al bloqueado y se avanza al
+siguiente disponible.
+
 Este script SOLO asigna "CM SE" en Pipedrive -- no toca Google Calendar
 ni ningun archivo del repo. La creacion del evento de calendario (con
 disponibilidad de 50 min, reunion de 45 min, invitando al SE) la hace
@@ -151,6 +159,17 @@ CM_POOL = {
 # BDR y SE".
 SELF_ASSIGN_ONLY_POOL = {
     21997527: "Valentina Carrillo",
+}
+
+# Bloqueo temporal de CMs: mientras date.today() <= fecha indicada, el CM
+# no recibe asignaciones por balanceo, rotacion organic/google ni
+# continuidad. La Excepcion 1 (autoasignacion cuando el propio CM es el
+# BDR) SI sigue aplicando aunque este bloqueado.
+# Si el CM de continuidad esta bloqueado, el deal cae al balanceo normal.
+# En la rotacion organic/google se salta al bloqueado y se pasa al
+# siguiente disponible en ORGANIC_GOOGLE_ROTATION.
+TEMPORARILY_BLOCKED_UNTIL = {
+    21686645: date(2026, 10, 12),  # Manoella De Andreis -- bloqueada hasta el 12 oct 2026 inclusive
 }
 
 # Stages con order_nr >= la etapa "Opp" de su propio pipeline (id -> nombre):
@@ -261,6 +280,14 @@ def deal_channel(deal):
     return deal.get("channel")
 
 
+def get_blocked_cms():
+    """Devuelve el conjunto de CM IDs que no deben recibir asignaciones hoy
+    segun TEMPORARILY_BLOCKED_UNTIL. Un CM bloqueado sigue siendo elegible
+    para la Excepcion 1 (autoasignacion BDR=SE)."""
+    today = date.today()
+    return {cm_id for cm_id, until in TEMPORARILY_BLOCKED_UNTIL.items() if today <= until}
+
+
 def get_last_organic_google_cm():
     """Busca el deal mas reciente (por fecha de creacion) de canal
     organic/google que ya tiene CM SE asignado Y que fue creado despues de
@@ -276,11 +303,18 @@ def get_last_organic_google_cm():
     return None
 
 
-def next_in_organic_google_rotation(last_cm):
-    if last_cm not in ORGANIC_GOOGLE_ROTATION:
-        return ORGANIC_GOOGLE_ROTATION[0]
-    idx = ORGANIC_GOOGLE_ROTATION.index(last_cm)
-    return ORGANIC_GOOGLE_ROTATION[(idx + 1) % len(ORGANIC_GOOGLE_ROTATION)]
+def next_in_organic_google_rotation(last_cm, blocked=None):
+    """Devuelve el siguiente CM en la rotacion fija organic/google,
+    saltando a los que esten en `blocked`. Si todos estuvieran bloqueados
+    (caso improbable) cae al orden original sin filtrar."""
+    blocked = blocked or set()
+    available = [cm for cm in ORGANIC_GOOGLE_ROTATION if cm not in blocked]
+    if not available:
+        available = ORGANIC_GOOGLE_ROTATION  # fallback: no dejar deals sin asignar
+    if last_cm not in available:
+        return available[0]
+    idx = available.index(last_cm)
+    return available[(idx + 1) % len(available)]
 
 
 def cm_scheduled_on(deal):
@@ -348,7 +382,7 @@ def get_last_assigned_cm(load_deals):
     return candidates[0][2]
 
 
-def pick_next_cm(load, current, exclude=None):
+def pick_next_cm(load, current, exclude=None, blocked=None):
     """Smooth weighted round-robin: cada CM suma, en cada turno, un peso
     igual a (carga_maxima - su_carga + 1) -- mientras mas atras esta, mas
     peso acumula por turno. Se elige quien tenga el acumulador mas alto y
@@ -361,12 +395,29 @@ def pick_next_cm(load, current, exclude=None):
     el acumulador mas alto -- se usa para no repetir al ultimo asignado en
     la ronda inmediatamente anterior. Igual sigue sumando peso normal, asi
     que si vuelve a estar mas atras que los demas, gana la siguiente ronda
-    ya sin exclusion."""
+    ya sin exclusion.
+
+    `blocked` (opcional): conjunto de CMs que no pueden recibir asignaciones
+    hoy (ver TEMPORARILY_BLOCKED_UNTIL). Siguen acumulando peso para que
+    el balanceo sea correcto en cuanto se desbloqueen, pero no se los
+    selecciona. Si bloquear + excluir dejara el pool vacio, se ignora
+    `exclude` antes de `blocked`; si todos estuvieran bloqueados (caso
+    improbable), se ignora el bloqueo para no dejar deals sin asignar."""
+    blocked = blocked or set()
     max_load = max(load.values())
     weights = {cm_id: (max_load - load[cm_id]) + 1 for cm_id in load}
     for cm_id, w in weights.items():
         current[cm_id] += w
-    candidates = [cm_id for cm_id in load if cm_id != exclude] or list(load.keys())
+
+    # Candidatos: excluir bloqueados y el ultimo asignado (exclude).
+    candidates = [cm for cm in load if cm not in blocked and cm != exclude]
+    if not candidates:
+        # Si la exclusion de `exclude` vacio la lista, relajarla primero.
+        candidates = [cm for cm in load if cm not in blocked]
+    if not candidates:
+        # Todos bloqueados (caso improbable): ignorar bloqueo para no dejar sin asignar.
+        candidates = [cm for cm in load if cm != exclude] or list(load.keys())
+
     selected = max(candidates, key=lambda cm_id: (current[cm_id], -load[cm_id]))
     current[selected] -= sum(weights.values())
     return selected
@@ -409,10 +460,20 @@ def main():
         print(f"MODO TEST: solo se procesaran los primeros {MAX_TEST_MODE} deals pendientes")
     print(f"{'='*60}\n")
 
+    blocked_cms = get_blocked_cms()
+    if blocked_cms:
+        names = ", ".join(CM_POOL.get(cm_id, str(cm_id)) for cm_id in blocked_cms)
+        until_dates = ", ".join(
+            f"{CM_POOL.get(cm_id, cm_id)} hasta {TEMPORARILY_BLOCKED_UNTIL[cm_id].isoformat()}"
+            for cm_id in blocked_cms
+        )
+        print(f"CMs temporalmente bloqueados (no reciben asignaciones hoy): {until_dates}")
+
     load, load_deals = build_load_map()
     print("Carga actual del Grupo SE (ultimos 30 dias):")
     for cm_id, count in load.most_common():
-        print(f"  {CM_POOL[cm_id]} ({cm_id}): {count} deals")
+        blocked_tag = " [BLOQUEADO]" if cm_id in blocked_cms else ""
+        print(f"  {CM_POOL[cm_id]} ({cm_id}): {count} deals{blocked_tag}")
 
     last_assigned_cm = get_last_assigned_cm(load_deals)
     print(f"Ultimo CM asignado por balanceo/continuidad: {CM_POOL.get(last_assigned_cm, last_assigned_cm)}")
@@ -450,6 +511,7 @@ def main():
         continuity_cm = None
         is_organic_google = False
         if bdr_id in CM_POOL or bdr_id in SELF_ASSIGN_ONLY_POOL:
+            # Excepcion 1: el BDR es del Grupo SE -- se autoasigna aunque este bloqueado.
             chosen_cm = bdr_id
             reason = "BDR es del Grupo SE, se autoasigna"
             counts_toward_load = False
@@ -458,21 +520,28 @@ def main():
             stats["skipped_organic_google_paused"] += 1
             continue
         elif channel in EXCLUDED_ROTATION_CHANNELS:
+            # Excepcion 2: canal organic/google -- rotacion fija, saltando bloqueados.
             is_organic_google = True
             if organic_google_last_cm == "unfetched":
                 organic_google_last_cm = get_last_organic_google_cm()
-            chosen_cm = next_in_organic_google_rotation(organic_google_last_cm)
+            chosen_cm = next_in_organic_google_rotation(organic_google_last_cm, blocked=blocked_cms)
             organic_google_last_cm = chosen_cm  # avanza el puntero en memoria para el resto de esta corrida
             reason = f"canal {CHANNEL_NAMES.get(channel, channel)} -- rotacion fija Grupo SE"
             counts_toward_load = False
         else:
             continuity_cm = find_continuity_cm(org_id, cutoff)
-            if continuity_cm:
+            if continuity_cm and continuity_cm not in blocked_cms:
+                # Excepcion 3: continuidad -- el CM anterior no esta bloqueado.
                 chosen_cm = continuity_cm
                 reason = "continuidad (deal Lost reciente en Opp+)"
             else:
-                chosen_cm = pick_next_cm(load, current, exclude=last_assigned_cm)
-                reason = "balanceo (round-robin ponderado, sin repetir al ultimo asignado)"
+                # Balanceo normal. Si habia continuidad pero el CM esta bloqueado, lo indica.
+                if continuity_cm and continuity_cm in blocked_cms:
+                    continuity_note = f" (CM de continuidad {CM_POOL.get(continuity_cm, continuity_cm)} bloqueado temporalmente, cae a balanceo)"
+                else:
+                    continuity_note = ""
+                chosen_cm = pick_next_cm(load, current, exclude=last_assigned_cm, blocked=blocked_cms)
+                reason = f"balanceo (round-robin ponderado, sin repetir al ultimo asignado){continuity_note}"
             counts_toward_load = True
             last_assigned_cm = chosen_cm  # avanza el puntero para el resto de esta corrida
 
@@ -487,7 +556,7 @@ def main():
                 stats["assigned_self_bdr"] += 1
             elif is_organic_google:
                 stats["assigned_organic_google"] += 1
-            elif continuity_cm:
+            elif continuity_cm and continuity_cm not in blocked_cms:
                 stats["assigned_continuity"] += 1
             result_log.append({"deal_id": deal_id, "assigned_to": chosen_cm, "reason": reason})
             continue
@@ -503,7 +572,7 @@ def main():
                     stats["assigned_self_bdr"] += 1
                 elif is_organic_google:
                     stats["assigned_organic_google"] += 1
-                elif continuity_cm:
+                elif continuity_cm and continuity_cm not in blocked_cms:
                     stats["assigned_continuity"] += 1
                 result_log.append({"deal_id": deal_id, "assigned_to": chosen_cm, "reason": reason})
             else:
