@@ -149,9 +149,10 @@ ORGANIC_GOOGLE_ROTATION = [
 # donde el BDR mueve el deal al agendar la reunion.
 SCHEDULED_COMMERCIAL_MEETING_STAGE_ID = 20
 
-CM_SE_KEY = "ae660fc6250e95791638d5e5a054b5077e2129d6"           # CM SE (user field)
-BDR_KEY = "64580d9fd4762bd5d18027ee8fb90ab3a93201d3"             # BDR (user field)
-CM_SCHEDULED_ON_KEY = "12a53bac7b0c1a6d7d743f6ee2ad09e567b62ed8"  # CM scheduled on (date field)
+CM_SE_KEY = "ae660fc6250e95791638d5e5a054b5077e2129d6"                    # CM SE (user field)
+BDR_KEY = "64580d9fd4762bd5d18027ee8fb90ab3a93201d3"                      # BDR (user field)
+CM_SCHEDULED_ON_KEY = "12a53bac7b0c1a6d7d743f6ee2ad09e567b62ed8"           # CM scheduled on (date field) -- cuando se agendo
+COMM_MEETING_SCHEDULE_KEY = "99d9a554960e267e06ac16c7ea4d1757c35d0b6e"     # Comm. Meeting Schedule (date/datetime field) -- para cuando es la reunion
 
 # Grupo SE: pool fijo de CMs elegibles para el balanceo, rotacion
 # organic/google y continuidad.
@@ -304,25 +305,26 @@ def deal_channel(deal):
     return deal.get("channel")
 
 
-def get_blocked_cms(scheduled_date=None):
+def get_blocked_cms(meeting_date=None):
     """Combina los dos mecanismos de bloqueo y devuelve el set de CM IDs que
-    no deben recibir asignaciones para deals con la fecha indicada.
+    no deben recibir asignaciones para deals cuya reunion ("Comm. Meeting
+    Schedule") cae en `meeting_date`.
 
-    - CM_BLOCKED_FOR_DATE_RANGE: bloqueado si `scheduled_date` cae dentro
+    - CM_BLOCKED_FOR_DATE_RANGE: bloqueado si `meeting_date` cae dentro
       del rango (inicio y fin inclusivos).
-    - CM_BLOCKED_FOR_SCHEDULED_DATES: bloqueado si `scheduled_date` esta en
+    - CM_BLOCKED_FOR_SCHEDULED_DATES: bloqueado si `meeting_date` esta en
       el conjunto de fechas sueltas del CM.
 
-    Ambos mecanismos se basan en la fecha del deal, no en la fecha actual.
-    La Excepcion 1 (autoasignacion BDR=SE) NO se ve afectada por este set --
-    el llamador es quien decide si aplicar o no el bloqueo segun el caso."""
+    Ambos mecanismos usan la fecha de la reunion, no la fecha actual ni la
+    fecha en que se agendo. La Excepcion 1 (autoasignacion BDR=SE) NO se ve
+    afectada -- el llamador decide si aplicar o no el bloqueo segun el caso."""
     blocked = set()
-    if scheduled_date is not None:
+    if meeting_date is not None:
         for cm_id, (start, end) in CM_BLOCKED_FOR_DATE_RANGE.items():
-            if start <= scheduled_date <= end:
+            if start <= meeting_date <= end:
                 blocked.add(cm_id)
         for cm_id, dates in CM_BLOCKED_FOR_SCHEDULED_DATES.items():
-            if scheduled_date in dates:
+            if meeting_date in dates:
                 blocked.add(cm_id)
     return blocked
 
@@ -361,6 +363,21 @@ def cm_scheduled_on(deal):
     if isinstance(raw, dict):
         return raw.get("value")
     return raw
+
+
+def comm_meeting_date(deal):
+    """Devuelve la fecha (date) de 'Comm. Meeting Schedule' del deal, o None
+    si no esta seteada. El campo puede ser date o datetime; se usa solo la
+    parte de fecha (primeros 10 caracteres)."""
+    raw = deal.get(COMM_MEETING_SCHEDULE_KEY)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
 
 
 def get_pending_deals_today():
@@ -500,29 +517,20 @@ def main():
         print(f"MODO TEST: solo se procesaran los primeros {MAX_TEST_MODE} deals pendientes")
     print(f"{'='*60}\n")
 
-    # Combina ambos mecanismos de bloqueo usando la fecha de hoy como
-    # scheduled_date (todos los deals pendientes tienen CM scheduled on = hoy).
-    today_date = date.today()
-    blocked_cms = get_blocked_cms(scheduled_date=today_date)
-    if blocked_cms:
-        until_dates = []
-        for cm_id in blocked_cms:
-            name = CM_POOL.get(cm_id, str(cm_id))
-            reasons = []
-            if cm_id in CM_BLOCKED_FOR_DATE_RANGE:
-                start, end = CM_BLOCKED_FOR_DATE_RANGE[cm_id]
-                if start <= today_date <= end:
-                    reasons.append(f"rango {start.isoformat()} a {end.isoformat()}")
-            if cm_id in CM_BLOCKED_FOR_SCHEDULED_DATES and today_date in CM_BLOCKED_FOR_SCHEDULED_DATES[cm_id]:
-                reasons.append(f"fecha puntual {today_date.isoformat()}")
-            until_dates.append(f"{name} ({', '.join(reasons)})")
-        print(f"CMs bloqueados hoy: {'; '.join(until_dates)}")
+    # Muestra las reglas de bloqueo activas. El set real de CMs bloqueados se
+    # calcula por deal usando la fecha de "Comm. Meeting Schedule" de cada uno.
+    if CM_BLOCKED_FOR_DATE_RANGE or CM_BLOCKED_FOR_SCHEDULED_DATES:
+        print("Reglas de bloqueo activas (se evaluan por fecha de reunion de cada deal):")
+        for cm_id, (start, end) in CM_BLOCKED_FOR_DATE_RANGE.items():
+            print(f"  {CM_POOL.get(cm_id, cm_id)}: bloqueado para reuniones del {start.isoformat()} al {end.isoformat()} inclusive")
+        for cm_id, dates in CM_BLOCKED_FOR_SCHEDULED_DATES.items():
+            sorted_dates = ", ".join(d.isoformat() for d in sorted(dates))
+            print(f"  {CM_POOL.get(cm_id, cm_id)}: bloqueado para reuniones del {sorted_dates}")
 
     load, load_deals = build_load_map()
     print("Carga actual del Grupo SE (ultimos 30 dias):")
     for cm_id, count in load.most_common():
-        blocked_tag = " [BLOQUEADO]" if cm_id in blocked_cms else ""
-        print(f"  {CM_POOL[cm_id]} ({cm_id}): {count} deals{blocked_tag}")
+        print(f"  {CM_POOL[cm_id]} ({cm_id}): {count} deals")
 
     last_assigned_cm = get_last_assigned_cm(load_deals)
     print(f"Ultimo CM asignado por balanceo/continuidad: {CM_POOL.get(last_assigned_cm, last_assigned_cm)}")
@@ -556,6 +564,13 @@ def main():
         org_id = deal_org_id(deal)
         bdr_id = bdr_user_id(deal)
         channel = deal_channel(deal)
+
+        # Bloqueo basado en la fecha de la reunion (Comm. Meeting Schedule).
+        meeting_dt = comm_meeting_date(deal)
+        blocked_cms = get_blocked_cms(meeting_date=meeting_dt)
+        if blocked_cms and meeting_dt:
+            names = ", ".join(CM_POOL.get(c, str(c)) for c in blocked_cms)
+            print(f"[{i}/{len(pending)}] '{title}' (deal {deal_id}): reunion {meeting_dt.isoformat()} -- CMs bloqueados para esta fecha: {names}")
 
         continuity_cm = None
         is_organic_google = False
