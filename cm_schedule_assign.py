@@ -66,13 +66,25 @@ antes de perderse), el deal se asigna al mismo CM SE que tenia ese deal
 anterior, sin pasar por el balanceo. Si ese deal anterior no tiene CM SE
 asignado, se sigue con el balanceo normal.
 
-Bloqueo temporal de CMs: un CM listado en TEMPORARILY_BLOCKED_UNTIL no
-recibe asignaciones (ni por balanceo, ni por rotacion organic/google, ni
-por continuidad) mientras la fecha actual sea <= su fecha de bloqueo. La
-excepcion 1 (autoasignacion BDR=SE) si aplica aunque este bloqueado. Si
-el CM de continuidad esta bloqueado, el deal cae al balanceo normal. En
-la rotacion organic/google se salta al bloqueado y se avanza al
-siguiente disponible.
+Bloqueos temporales de CMs: hay dos mecanismos independientes que se
+combinan al inicio de cada corrida. Ambos se basan en la fecha del deal
+("CM scheduled on"), no en la fecha en que corre el script. El resultado
+es un unico set de CMs bloqueados que se aplica igual en balanceo,
+rotacion organic/google y continuidad. La Excepcion 1 (autoasignacion
+BDR=SE) SI aplica aunque el CM este bloqueado.
+
+  CM_BLOCKED_FOR_DATE_RANGE: bloquea a un CM para deals cuya fecha de
+  reunion caiga dentro de un rango (inicio y fin inclusivos). Util para
+  ausencias por dias corridos (licencias, vacaciones, etc.).
+
+  CM_BLOCKED_FOR_SCHEDULED_DATES: bloquea a un CM para deals cuya fecha
+  de reunion caiga en un conjunto de fechas sueltas. Util para dias
+  puntuales sin afectar el resto de la semana.
+
+  Si el CM de continuidad queda bloqueado por cualquiera de los dos
+  mecanismos, el deal cae al balanceo normal con el resto del pool.
+  En la rotacion organic/google se salta al bloqueado y se avanza al
+  siguiente disponible en ORGANIC_GOOGLE_ROTATION.
 
 Este script SOLO asigna "CM SE" en Pipedrive -- no toca Google Calendar
 ni ningun archivo del repo. La creacion del evento de calendario (con
@@ -161,16 +173,28 @@ SELF_ASSIGN_ONLY_POOL = {
     21997527: "Valentina Carrillo",
 }
 
-# Bloqueo temporal de CMs: mientras date.today() <= fecha indicada, el CM
-# no recibe asignaciones por balanceo, rotacion organic/google ni
-# continuidad. La Excepcion 1 (autoasignacion cuando el propio CM es el
-# BDR) SI sigue aplicando aunque este bloqueado.
-# Si el CM de continuidad esta bloqueado, el deal cae al balanceo normal.
-# En la rotacion organic/google se salta al bloqueado y se pasa al
-# siguiente disponible en ORGANIC_GOOGLE_ROTATION.
-TEMPORARILY_BLOCKED_UNTIL = {
-    21686645: date(2026, 10, 12),  # Manoella De Andreis -- bloqueada hasta el 12 oct 2026 inclusive
+# ---------------------------------------------------------------------------
+# Bloqueos temporales de CMs
+# Ambos mecanismos se basan en la fecha del deal ("CM scheduled on"), no en
+# la fecha en que corre el script. La Excepcion 1 (autoasignacion BDR=SE)
+# SI aplica aunque el CM este bloqueado por cualquiera de los dos.
+# ---------------------------------------------------------------------------
+
+# Mecanismo A: bloqueo por rango de fechas del deal (inicio y fin inclusivos).
+# Un CM no recibe deals cuya fecha de reunion caiga dentro del rango.
+# Util para ausencias por dias corridos (licencias, vacaciones, etc.).
+CM_BLOCKED_FOR_DATE_RANGE = {
+    21686645: (date(2026, 10, 1), date(2026, 10, 12)),  # Manoella De Andreis -- no recibe deals oct 1-12 inclusive
 }
+
+# Mecanismo B: bloqueo por fechas sueltas del deal ("CM scheduled on").
+# Un CM no recibe deals cuya fecha de reunion caiga en el conjunto indicado.
+# Util para bloquear dias puntuales sin afectar el resto de la semana.
+CM_BLOCKED_FOR_SCHEDULED_DATES = {
+    21983370: {date(2026, 10, 8), date(2026, 10, 9)},  # Daniel Fiquitiva -- no recibe deals de oct 8 ni 9
+}
+
+# ---------------------------------------------------------------------------
 
 # Stages con order_nr >= la etapa "Opp" de su propio pipeline (id -> nombre):
 #   Expansion Deals (pipeline 1): OPP(1), Proposal Sent(2), Contract Signed(3)
@@ -280,12 +304,27 @@ def deal_channel(deal):
     return deal.get("channel")
 
 
-def get_blocked_cms():
-    """Devuelve el conjunto de CM IDs que no deben recibir asignaciones hoy
-    segun TEMPORARILY_BLOCKED_UNTIL. Un CM bloqueado sigue siendo elegible
-    para la Excepcion 1 (autoasignacion BDR=SE)."""
-    today = date.today()
-    return {cm_id for cm_id, until in TEMPORARILY_BLOCKED_UNTIL.items() if today <= until}
+def get_blocked_cms(scheduled_date=None):
+    """Combina los dos mecanismos de bloqueo y devuelve el set de CM IDs que
+    no deben recibir asignaciones para deals con la fecha indicada.
+
+    - CM_BLOCKED_FOR_DATE_RANGE: bloqueado si `scheduled_date` cae dentro
+      del rango (inicio y fin inclusivos).
+    - CM_BLOCKED_FOR_SCHEDULED_DATES: bloqueado si `scheduled_date` esta en
+      el conjunto de fechas sueltas del CM.
+
+    Ambos mecanismos se basan en la fecha del deal, no en la fecha actual.
+    La Excepcion 1 (autoasignacion BDR=SE) NO se ve afectada por este set --
+    el llamador es quien decide si aplicar o no el bloqueo segun el caso."""
+    blocked = set()
+    if scheduled_date is not None:
+        for cm_id, (start, end) in CM_BLOCKED_FOR_DATE_RANGE.items():
+            if start <= scheduled_date <= end:
+                blocked.add(cm_id)
+        for cm_id, dates in CM_BLOCKED_FOR_SCHEDULED_DATES.items():
+            if scheduled_date in dates:
+                blocked.add(cm_id)
+    return blocked
 
 
 def get_last_organic_google_cm():
@@ -397,12 +436,13 @@ def pick_next_cm(load, current, exclude=None, blocked=None):
     que si vuelve a estar mas atras que los demas, gana la siguiente ronda
     ya sin exclusion.
 
-    `blocked` (opcional): conjunto de CMs que no pueden recibir asignaciones
-    hoy (ver TEMPORARILY_BLOCKED_UNTIL). Siguen acumulando peso para que
-    el balanceo sea correcto en cuanto se desbloqueen, pero no se los
-    selecciona. Si bloquear + excluir dejara el pool vacio, se ignora
-    `exclude` antes de `blocked`; si todos estuvieran bloqueados (caso
-    improbable), se ignora el bloqueo para no dejar deals sin asignar."""
+    `blocked` (opcional): conjunto de CMs bloqueados temporalmente (ver
+    CM_BLOCKED_FOR_DATE_RANGE y CM_BLOCKED_FOR_SCHEDULED_DATES). Siguen
+    acumulando peso para que el balanceo sea correcto en cuanto se
+    desbloqueen, pero no se los selecciona. Si bloquear + excluir dejara
+    el pool vacio, se ignora `exclude` antes de `blocked`; si todos
+    estuvieran bloqueados (caso improbable), se ignora el bloqueo para no
+    dejar deals sin asignar."""
     blocked = blocked or set()
     max_load = max(load.values())
     weights = {cm_id: (max_load - load[cm_id]) + 1 for cm_id in load}
@@ -460,14 +500,23 @@ def main():
         print(f"MODO TEST: solo se procesaran los primeros {MAX_TEST_MODE} deals pendientes")
     print(f"{'='*60}\n")
 
-    blocked_cms = get_blocked_cms()
+    # Combina ambos mecanismos de bloqueo usando la fecha de hoy como
+    # scheduled_date (todos los deals pendientes tienen CM scheduled on = hoy).
+    today_date = date.today()
+    blocked_cms = get_blocked_cms(scheduled_date=today_date)
     if blocked_cms:
-        names = ", ".join(CM_POOL.get(cm_id, str(cm_id)) for cm_id in blocked_cms)
-        until_dates = ", ".join(
-            f"{CM_POOL.get(cm_id, cm_id)} hasta {TEMPORARILY_BLOCKED_UNTIL[cm_id].isoformat()}"
-            for cm_id in blocked_cms
-        )
-        print(f"CMs temporalmente bloqueados (no reciben asignaciones hoy): {until_dates}")
+        until_dates = []
+        for cm_id in blocked_cms:
+            name = CM_POOL.get(cm_id, str(cm_id))
+            reasons = []
+            if cm_id in CM_BLOCKED_FOR_DATE_RANGE:
+                start, end = CM_BLOCKED_FOR_DATE_RANGE[cm_id]
+                if start <= today_date <= end:
+                    reasons.append(f"rango {start.isoformat()} a {end.isoformat()}")
+            if cm_id in CM_BLOCKED_FOR_SCHEDULED_DATES and today_date in CM_BLOCKED_FOR_SCHEDULED_DATES[cm_id]:
+                reasons.append(f"fecha puntual {today_date.isoformat()}")
+            until_dates.append(f"{name} ({', '.join(reasons)})")
+        print(f"CMs bloqueados hoy: {'; '.join(until_dates)}")
 
     load, load_deals = build_load_map()
     print("Carga actual del Grupo SE (ultimos 30 dias):")
