@@ -79,6 +79,17 @@ antes de perderse), el deal se asigna al mismo CM SE que tenia ese deal
 anterior, sin pasar por el balanceo. Si ese deal anterior no tiene CM SE
 asignado, se sigue con el balanceo normal.
 
+Si no hay continuidad por deal Lost, se intenta una segunda forma de
+continuidad (agregada 2026-10-13, misma Excepcion 4, prioridad menor):
+si la organizacion tiene OTRO deal (abierto, ganado o perdido, de
+cualquier pipeline, excluyendo el deal actual) cuyo "SQL date" cae
+dentro de los ultimos SQL_DATE_LOOKBACK_DAYS dias Y que ya tiene CM SE
+asignado, el deal se asigna a ese mismo CM. Si hay varios, se usa el de
+"SQL date" mas reciente. Esta via NO aplica a deals de canal
+organic/google (Excepcion 2 ya decidio esos antes de llegar aqui). Si
+ninguna de las 2 formas de continuidad aplica, se sigue con el balanceo
+normal.
+
 Valentina Carrillo es miembro pleno del Grupo SE desde 2026-10-13 (antes
 estaba en un pool aparte, SELF_ASSIGN_ONLY_POOL, solo para autoasignacion
 cuando ella misma era BDR) -- entra al balanceo, rotacion organic/google
@@ -178,6 +189,7 @@ CM_SE_KEY = "ae660fc6250e95791638d5e5a054b5077e2129d6"                    # CM S
 BDR_KEY = "64580d9fd4762bd5d18027ee8fb90ab3a93201d3"                      # BDR (user field)
 CM_SCHEDULED_ON_KEY = "12a53bac7b0c1a6d7d743f6ee2ad09e567b62ed8"           # CM scheduled on (date field) -- cuando se agendo
 COMM_MEETING_SCHEDULE_KEY = "99d9a554960e267e06ac16c7ea4d1757c35d0b6e"     # Comm. Meeting Schedule (date/datetime field) -- para cuando es la reunion
+SQL_DATE_KEY = "8efe73cd06135bcc6e31a5c427c533c29cfb8d97"                  # SQL date (date field)
 
 # Grupo SE: pool fijo de CMs elegibles para el balanceo, rotacion
 # organic/google y continuidad. Valentina Carrillo entro como miembro
@@ -244,6 +256,7 @@ CM_BLOCKED_FOR_SCHEDULED_DATES = {}
 OPP_OR_LATER_STAGE_IDS = {1, 2, 3, 9, 10, 17, 25, 26, 27, 12, 15, 16, 28, 29, 30}
 
 LOST_LOOKBACK_DAYS = 183  # ~6 meses
+SQL_DATE_LOOKBACK_DAYS = 60
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 MAX_TEST_MODE = 5
@@ -312,6 +325,20 @@ def get_org_lost_deals(org_id):
     deals, start = [], 0
     while True:
         resp = api_get(f"organizations/{org_id}/deals", {"status": "lost", "start": start, "limit": 500})
+        data = resp.get("data") or []
+        deals.extend(data)
+        pagination = resp.get("additional_data", {}).get("pagination", {})
+        if pagination.get("more_items_in_collection"):
+            start = pagination["next_start"]
+        else:
+            break
+    return deals
+
+
+def get_org_deals_all_statuses(org_id):
+    deals, start = [], 0
+    while True:
+        resp = api_get(f"organizations/{org_id}/deals", {"status": "all_not_deleted", "start": start, "limit": 500})
         data = resp.get("data") or []
         deals.extend(data)
         pagination = resp.get("additional_data", {}).get("pagination", {})
@@ -559,6 +586,46 @@ def find_continuity_cm(org_id, cutoff):
     return cm_user_id(most_recent)
 
 
+def sql_date(deal):
+    raw = deal.get(SQL_DATE_KEY)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+def find_sql_date_continuity_cm(org_id, current_deal_id, cutoff_date):
+    """Segunda forma de continuidad (ver Excepcion 4): busca, entre TODOS
+    los deals de la organizacion (abiertos, ganados o perdidos, excluyendo
+    el deal actual), el mas reciente por 'SQL date' que caiga dentro de
+    SQL_DATE_LOOKBACK_DAYS dias Y que ya tenga CM SE asignado. Devuelve ese
+    CM SE, o None si no hay ninguno."""
+    if not org_id:
+        return None
+
+    candidates = []
+    for d in get_org_deals_all_statuses(org_id):
+        if d.get("id") == current_deal_id:
+            continue
+        sd = sql_date(d)
+        if not sd or sd < cutoff_date:
+            continue
+        cm_id = cm_user_id(d)
+        if cm_id not in CM_POOL:
+            continue
+        candidates.append((sd, d.get("update_time") or "", cm_id))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
 def main():
     print(f"\n{'='*60}")
     print("CM Schedule Auto Assign")
@@ -595,6 +662,7 @@ def main():
         return
 
     cutoff = datetime.now() - timedelta(days=LOST_LOOKBACK_DAYS)
+    sql_date_cutoff = date.today() - timedelta(days=SQL_DATE_LOOKBACK_DAYS)
     current = Counter({uid: 0 for uid in CM_POOL})
     stats = {
         "assigned": 0,
@@ -651,7 +719,16 @@ def main():
                 and logo_type in IRONMAN_CHAMPION_OPTION_IDS
                 and coach_cm not in blocked_cms
             )
-            continuity_cm = None if is_ironman_champion else find_continuity_cm(org_id, cutoff)
+            continuity_cm = None
+            continuity_reason = None
+            if not is_ironman_champion:
+                continuity_cm = find_continuity_cm(org_id, cutoff)
+                if continuity_cm:
+                    continuity_reason = "continuidad (deal Lost reciente en Opp+)"
+                else:
+                    continuity_cm = find_sql_date_continuity_cm(org_id, deal_id, sql_date_cutoff)
+                    if continuity_cm:
+                        continuity_reason = f"continuidad (otra oportunidad de la organizacion con SQL date en los ultimos {SQL_DATE_LOOKBACK_DAYS} dias)"
 
             if is_ironman_champion:
                 # Excepcion 3: cuenta Ironman/Champion -- coach de SE fijo.
@@ -660,7 +737,7 @@ def main():
             elif continuity_cm and continuity_cm not in blocked_cms:
                 # Excepcion 4: continuidad -- el CM anterior no esta bloqueado.
                 chosen_cm = continuity_cm
-                reason = "continuidad (deal Lost reciente en Opp+)"
+                reason = continuity_reason
             else:
                 # Balanceo normal. Si habia continuidad pero el CM esta bloqueado, lo indica.
                 if continuity_cm and continuity_cm in blocked_cms:
