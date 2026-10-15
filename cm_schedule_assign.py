@@ -59,20 +59,7 @@ asignacion manual. Reactivada 2026-08-27; ver
 ORGANIC_GOOGLE_ROTATION_RESET_AT para como se reinicio limpio en
 Manoella sin perder la continuidad de la rotacion hacia adelante.
 
-Excepcion 3 (cuenta Ironman/Champion -- coach de SE fijo, agregada
-2026-10-13, portada desde el repo pipedrive-weekly): si el campo "Logo
-Type" de la organizacion del deal es Ironman o Champion, Y el BDR del
-deal tiene un coach de SE asignado (ver SE_COACH_BY_BDR), el deal se
-asigna DIRECTO a ese coach, sin importar disponibilidad de calendario ni
-cuanta carga tenga -- ignora continuidad y balanceo por completo. Si la
-org es Ironman/Champion pero el BDR no tiene coach asignado (no esta en
-SE_COACH_BY_BDR), esta excepcion no aplica y se sigue con continuidad/
-balanceo normal. Esta excepcion tiene PRIORIDAD sobre la Excepcion 4
-(continuidad de cuenta) -- se revisa primero. Si el coach fijo esta
-bloqueado (ver mas abajo) para la fecha de la reunion, esta excepcion
-tampoco aplica y se sigue con continuidad/balanceo normal.
-
-Excepcion 4 (continuidad de cuenta): si la organizacion del deal tiene
+Excepcion 3 (continuidad de cuenta): si la organizacion del deal tiene
 un deal Lost de hace menos de 6 meses cuya ultima etapa fue "Opp" o una
 etapa posterior en su pipeline (o sea, llego a ser una oportunidad real
 antes de perderse), el deal se asigna al mismo CM SE que tenia ese deal
@@ -80,7 +67,7 @@ anterior, sin pasar por el balanceo. Si ese deal anterior no tiene CM SE
 asignado, se sigue con el balanceo normal.
 
 Si no hay continuidad por deal Lost, se intenta una segunda forma de
-continuidad (agregada 2026-10-13, misma Excepcion 4, prioridad menor):
+continuidad (agregada 2026-10-13, misma Excepcion 3, prioridad menor):
 si la organizacion tiene OTRO deal (abierto, ganado o perdido, de
 cualquier pipeline, excluyendo el deal actual) cuyo "SQL date" cae
 dentro de los ultimos SQL_DATE_LOOKBACK_DAYS dias Y que ya tiene CM SE
@@ -89,6 +76,12 @@ asignado, el deal se asigna a ese mismo CM. Si hay varios, se usa el de
 organic/google (Excepcion 2 ya decidio esos antes de llegar aqui). Si
 ninguna de las 2 formas de continuidad aplica, se sigue con el balanceo
 normal.
+
+(Historico: hubo una Excepcion de "cuenta Ironman/Champion -- coach de
+SE fijo" agregada 2026-10-13, que asignaba directo a un coach segun el
+BDR sin importar carga/continuidad. El usuario pidio quitarla 2026-10-14
+-- esas cuentas ahora entran al pool normal (continuidad/balanceo) como
+cualquier otro deal, sin trato especial.)
 
 Valentina Carrillo es miembro pleno del Grupo SE desde 2026-10-13 (antes
 estaba en un pool aparte, SELF_ASSIGN_ONLY_POOL, solo para autoasignacion
@@ -99,7 +92,7 @@ Bloqueos temporales de CMs: hay dos mecanismos independientes que se
 combinan al inicio de cada corrida. Ambos se basan en la fecha del deal
 ("CM scheduled on"), no en la fecha en que corre el script. El resultado
 es un unico set de CMs bloqueados que se aplica igual en balanceo,
-rotacion organic/google, continuidad y el coach fijo Ironman/Champion. La
+rotacion organic/google y continuidad. La
 Excepcion 1 (autoasignacion BDR=SE) SI aplica aunque el CM este
 bloqueado. Ambos dicts estan vacios por defecto -- llenarlos solo
 mientras dure la ausencia puntual de alguien, y vaciarlos de nuevo
@@ -202,26 +195,6 @@ CM_POOL = {
     21983447: "Sofia Bello",
     21686656: "Fabian Cubillos",
     21997527: "Valentina Carrillo",
-}
-
-# Cuentas Ironman/Champion -- coach de SE fijo por BDR (ver Excepcion 3,
-# portada 2026-10-13 desde pipedrive-weekly, mapa "SE Coaching"). Campo
-# "Logo Type" en Organizacion (id 26, enum). Opciones usadas: Ironman=313,
-# Champion=314 -- existe una 3ra opcion "Target MX Champion" (id 1418) que
-# el usuario no menciono, se deja fuera a proposito hasta que confirme si
-# tambien cuenta.
-LOGO_TYPE_KEY = "b5a5290a565880a732f018c364e182719520bdd2"
-IRONMAN_CHAMPION_OPTION_IDS = {313, 314}
-
-# BDR -> SE coach asignado. Si el BDR del deal no esta aqui, la Excepcion 3
-# no aplica aunque la org sea Ironman/Champion (sigue con continuidad/
-# balanceo normal).
-SE_COACH_BY_BDR = {
-    25594802: 21686645,  # Adriana Cardenas -> Manoella De Andreis
-    27152017: 21983370,  # Alejandra "Male" Lievano -> Daniel Fiquitiva
-    27766664: 21686656,  # Carlos Cerquera -> Fabian Cubillos
-    25168321: 21983447,  # Valentina Martin Clavijo -> Sofia Bello
-    27766675: 21983348,  # Lina Perez -> Andres Mayusa
 }
 
 # ---------------------------------------------------------------------------
@@ -347,20 +320,6 @@ def get_org_deals_all_statuses(org_id):
         else:
             break
     return deals
-
-
-def get_org_logo_type(org_id):
-    """Devuelve el option id del campo 'Logo Type' de la organizacion, o
-    None si no esta seteado. Una llamada directa a /organizations/{id}
-    (no hay filtro guardado para esto, es un campo por organizacion)."""
-    if not org_id:
-        return None
-    resp = api_get(f"organizations/{org_id}")
-    org = resp.get("data") or {}
-    raw = org.get(LOGO_TYPE_KEY)
-    if isinstance(raw, dict):
-        return raw.get("value")
-    return raw
 
 
 def cm_user_id(deal):
@@ -668,7 +627,6 @@ def main():
         "assigned": 0,
         "assigned_self_bdr": 0,
         "assigned_organic_google": 0,
-        "assigned_ironman_champion": 0,
         "assigned_continuity": 0,
         "skipped_organic_google_paused": 0,
         "error": 0,
@@ -692,7 +650,6 @@ def main():
 
         continuity_cm = None
         is_organic_google = False
-        is_ironman_champion = False
         if bdr_id in CM_POOL:
             # Excepcion 1: el BDR es del Grupo SE -- se autoasigna aunque este bloqueado.
             chosen_cm = bdr_id
@@ -712,30 +669,16 @@ def main():
             reason = f"canal {CHANNEL_NAMES.get(channel, channel)} -- rotacion fija Grupo SE"
             counts_toward_load = False
         else:
-            coach_cm = SE_COACH_BY_BDR.get(bdr_id)
-            logo_type = get_org_logo_type(org_id) if coach_cm else None
-            is_ironman_champion = (
-                bool(coach_cm)
-                and logo_type in IRONMAN_CHAMPION_OPTION_IDS
-                and coach_cm not in blocked_cms
-            )
-            continuity_cm = None
-            continuity_reason = None
-            if not is_ironman_champion:
-                continuity_cm = find_continuity_cm(org_id, cutoff)
+            continuity_cm = find_continuity_cm(org_id, cutoff)
+            if continuity_cm:
+                continuity_reason = "continuidad (deal Lost reciente en Opp+)"
+            else:
+                continuity_cm = find_sql_date_continuity_cm(org_id, deal_id, sql_date_cutoff)
                 if continuity_cm:
-                    continuity_reason = "continuidad (deal Lost reciente en Opp+)"
-                else:
-                    continuity_cm = find_sql_date_continuity_cm(org_id, deal_id, sql_date_cutoff)
-                    if continuity_cm:
-                        continuity_reason = f"continuidad (otra oportunidad de la organizacion con SQL date en los ultimos {SQL_DATE_LOOKBACK_DAYS} dias)"
+                    continuity_reason = f"continuidad (otra oportunidad de la organizacion con SQL date en los ultimos {SQL_DATE_LOOKBACK_DAYS} dias)"
 
-            if is_ironman_champion:
-                # Excepcion 3: cuenta Ironman/Champion -- coach de SE fijo.
-                chosen_cm = coach_cm
-                reason = f"cuenta Ironman/Champion (Logo Type {logo_type}) -- coach de SE fijo para este BDR, salta disponibilidad/carga/continuidad"
-            elif continuity_cm and continuity_cm not in blocked_cms:
-                # Excepcion 4: continuidad -- el CM anterior no esta bloqueado.
+            if continuity_cm and continuity_cm not in blocked_cms:
+                # Excepcion 3: continuidad -- el CM anterior no esta bloqueado.
                 chosen_cm = continuity_cm
                 reason = continuity_reason
             else:
@@ -760,8 +703,6 @@ def main():
                 stats["assigned_self_bdr"] += 1
             elif is_organic_google:
                 stats["assigned_organic_google"] += 1
-            elif is_ironman_champion:
-                stats["assigned_ironman_champion"] += 1
             elif continuity_cm and continuity_cm not in blocked_cms:
                 stats["assigned_continuity"] += 1
             result_log.append({"deal_id": deal_id, "assigned_to": chosen_cm, "reason": reason})
@@ -778,8 +719,6 @@ def main():
                     stats["assigned_self_bdr"] += 1
                 elif is_organic_google:
                     stats["assigned_organic_google"] += 1
-                elif is_ironman_champion:
-                    stats["assigned_ironman_champion"] += 1
                 elif continuity_cm and continuity_cm not in blocked_cms:
                     stats["assigned_continuity"] += 1
                 result_log.append({"deal_id": deal_id, "assigned_to": chosen_cm, "reason": reason})
@@ -797,7 +736,7 @@ def main():
     print(
         f"Resumen: {stats['assigned']} asignados "
         f"({stats['assigned_self_bdr']} por BDR propio, {stats['assigned_organic_google']} por rotacion organic/google, "
-        f"{stats['assigned_ironman_champion']} por Ironman/Champion -> coach fijo, {stats['assigned_continuity']} por continuidad), "
+        f"{stats['assigned_continuity']} por continuidad), "
         f"{stats['skipped_organic_google_paused']} saltados (rotacion organic/google pausada), "
         f"{stats['error']} errores"
     )
