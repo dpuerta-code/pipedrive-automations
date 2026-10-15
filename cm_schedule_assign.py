@@ -365,18 +365,35 @@ def get_blocked_cms(meeting_date=None):
 
 
 def get_last_organic_google_cm():
-    """Busca el deal mas reciente (por fecha de creacion) de canal
-    organic/google que ya tiene CM SE asignado Y que fue creado despues de
-    ORGANIC_GOOGLE_ROTATION_RESET_AT. Devuelve su CM SE, o None si no hay
-    ninguno todavia -- ya sea porque es la primera vez que corre esta regla,
-    o porque estamos justo despues de un reinicio y todo el historial previo
-    quedo descartado a proposito (ver comentario en ORGANIC_GOOGLE_ROTATION_RESET_AT)."""
-    resp = api_get("deals", {"filter_id": ORGANIC_GOOGLE_FILTER_ID, "sort": "add_time DESC", "limit": 20})
-    deals = resp.get("data") or []
+    """Busca, entre los deals de canal organic/google que trae el filtro 71381
+    (ultimos 30 dias, cualquier stage/status), el que tenga "CM scheduled on"
+    mas reciente Y sea >= ORGANIC_GOOGLE_ROTATION_RESET_AT. Devuelve su CM SE,
+    o None si no hay ninguno valido -- ya sea porque es la primera vez que
+    corre esta regla, o porque estamos justo despues de un reinicio y todo el
+    historial previo quedo descartado a proposito (ver comentario en
+    ORGANIC_GOOGLE_ROTATION_RESET_AT).
+
+    CAMBIO 2026-10-15: antes se ordenaba por add_time via la API (sort=add_time
+    DESC) y se tomaba el primero. Eso dependia de que el filtro 71381 solo
+    mostrara deals todavia en el stage "Scheduled Commercial Meeting" -- en
+    cuanto un deal avanzaba de stage (tipicamente al ganarse) desaparecia del
+    filtro y su asignacion dejaba de contar, dejando la rotacion ciega a la
+    mayoria de los deals reales. El usuario corrigio el filtro para que ya no
+    excluya por stage; ahora hay que elegir explicitamente el de "CM scheduled
+    on" mas reciente en Python, porque la API de Pipedrive no soporta ordenar
+    por un campo custom."""
+    deals = get_deals_from_filter(ORGANIC_GOOGLE_FILTER_ID)
+    reset_date = ORGANIC_GOOGLE_ROTATION_RESET_AT[:10]
+    best_cm, best_key = None, None
     for d in deals:
-        if d.get("add_time", "") >= ORGANIC_GOOGLE_ROTATION_RESET_AT:
-            return cm_user_id(d)
-    return None
+        cm = cm_user_id(d)
+        sched = cm_scheduled_on(d)
+        if not cm or not sched or sched[:10] < reset_date:
+            continue
+        key = (sched[:10], d.get("id", 0))
+        if best_key is None or key > best_key:
+            best_key, best_cm = key, cm
+    return best_cm
 
 
 def next_in_organic_google_rotation(last_cm, blocked=None):
