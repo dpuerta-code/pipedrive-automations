@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enrola en una secuencia de Apollo los Leads de Pipedrive marcados con Campaing=Yes.
+Enrola en una secuencia de Apollo los Leads de Pipedrive con Lead Type = Prospection.
 
 La secuencia destino depende de "Organization Category" + "Source channel" del lead:
   - Source channel = Org Scoring:
@@ -46,10 +46,10 @@ APOLLO_BASE = "https://api.apollo.io/api/v1"
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 
-# Filtro Pipedrive "Campaing Yes (Apollo automation)" - creado 2026-09-09
-CAMPAING_FILTER_ID = 71499
+# Filtro Pipedrive "Apollo - Lead Type Prospection" - creado 2026-10-19
+PROSPECTION_FILTER_ID = 72429
 
-CAMPAING_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
+LEAD_TYPE_KEY = "c6285390d6bfe3ba42b929b5cbd61224ee60b54e"
 ORG_CAT_KEY = "fafdb80a27427f23c8f72675767e616461f056cb"
 CHANNEL_KEY = "channel"  # campo nativo "Source channel"
 
@@ -189,11 +189,11 @@ def resolve_sequence(org_category, channel, title):
     return None, "combinacion_sin_mapeo"
 
 
-def get_campaing_leads():
+def get_prospection_leads():
     leads = []
     start = 0
     while True:
-        resp = pd_get("leads", {"filter_id": CAMPAING_FILTER_ID, "limit": 500, "start": start})
+        resp = pd_get("leads", {"filter_id": PROSPECTION_FILTER_ID, "limit": 500, "start": start})
         data = resp.get("data") or []
         leads.extend(data)
         pagination = resp.get("additional_data", {}).get("pagination", {})
@@ -305,7 +305,7 @@ def main():
         print("MODO TEST: no se llamara a Apollo (solo lectura)")
     print(f"{'='*60}\n")
 
-    leads = get_campaing_leads()
+    leads = get_prospection_leads()
     print(f"Leads con Campaing=Yes: {len(leads)}\n")
 
     signals = load_prospeccion_signals()
