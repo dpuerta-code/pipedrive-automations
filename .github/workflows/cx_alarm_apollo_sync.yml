@@ -2,7 +2,7 @@ name: CX Alarm Apollo Sync
 
 on:
   schedule:
-    - cron: "0 15 * * *"  # Todos los dias 10am Colombia (UTC-5 -> 15:00 UTC)
+    - cron: "0 15 * * 1-5"  # Lun-Vie 10am Colombia (UTC-5 -> 15:00 UTC)
   workflow_dispatch:
     inputs:
       test_mode:
