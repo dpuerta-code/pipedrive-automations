@@ -4,6 +4,8 @@ Historial completo y explícito de todos los cambios de la rutina cloud **"CM Sc
 
 Este archivo es la **fuente de verdad del historial**: el prompt de la rutina mantiene solo las reglas vigentes (con los cambios históricos condensados) y apunta aquí para el detalle completo. Cada entrada de abajo es el texto explícito original, tal como vivió en el prompt. Las copias exactas de cada versión completa del prompt (v19–v27) se conservan además localmente versionadas.
 
+> **Mantenimiento (regla permanente, 2026-11-16):** cada cambio nuevo a la rutina debe hacer DOS cosas, siempre: (1) agregar aquí la entrada CAMBIO con el texto explícito COMPLETO (motivo real, deals involucrados, qué se corrigió), actualizando también las secciones de cascade/pool/filtros si cambiaron; y (2) entrar al prompt de la rutina solo en forma CONDENSADA (regla vigente + 1-3 líneas de contexto + referencia a este archivo). Cuando un cambio quede inactivo, su párrafo en el prompt se condensa a 1-3 líneas marcado "(historico)" — aquí nunca se borra nada.
+
 **Leyenda:** 🟢 = regla vigente hoy · ⚪ = histórico, ya no aplica.
 
 ---
