@@ -59,6 +59,12 @@ MOTOR_BDR_TAB = "Sheet1"
 # en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
 FALLBACK_OWNER_ID = 22926796  # Sofia Puerta (d.puerta@slangapp.com)
 
+# Fecha a partir de la cual el procesador vuelve a actuar sobre filas
+# 'pending'. Las ~142 pendientes acumuladas entre el 2026-09-21 (COMPOSIO_API_KEY
+# vencido) y esta fecha se dejan intactas en el Sheet como registro historico --
+# no se procesan ni se borran, simplemente no se tocan nunca.
+PROCESS_PENDING_FROM = date(2026, 11, 17)
+
 LEAD_MARKER = "Prospección Claude"
 CAMPAING_FIELD_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
 CAMPAING_YES = 1453
@@ -265,6 +271,20 @@ def sheet_get_records(sheet_name):
 def current_week_monday():
     today = date.today()
     return today - timedelta(days=today.weekday())
+
+
+def parse_queue_timestamp(raw):
+    """Parsea el timestamp tal como lo escribe doGet() (new Date() serializado
+    por Sheets en el locale en_US de la hoja, ej. '11/17/2026 12:19:29').
+    Devuelve None si no se puede parsear -- en ese caso la fila NO se filtra
+    por fecha (se trata como pendiente a procesar, nunca se pierde en limbo)."""
+    raw = str(raw).strip()
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def load_rotation_map():
@@ -801,8 +821,22 @@ def main():
     rotation_map = load_rotation_map()
     email_owner_map = load_email_owner_map()
 
-    pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
-    print(f"Filas pendientes: {len(pending)}\n")
+    all_pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
+    pending, skipped_historical = [], []
+    for row_num, row in all_pending:
+        queue_date = parse_queue_timestamp(row.get("timestamp"))
+        if queue_date is not None and queue_date < PROCESS_PENDING_FROM:
+            skipped_historical.append((row_num, row))
+        else:
+            pending.append((row_num, row))
+
+    if skipped_historical:
+        print(
+            f"Filas pendientes historicas (anteriores a {PROCESS_PENDING_FROM.isoformat()}, "
+            f"acumuladas durante la interrupcion del COMPOSIO_API_KEY): {len(skipped_historical)}. "
+            "No se tocan -- quedan como registro historico en el Sheet."
+        )
+    print(f"Filas pendientes a procesar: {len(pending)}\n")
 
     stats = {"done": 0, "needs_review": 0, "error": 0}
 
