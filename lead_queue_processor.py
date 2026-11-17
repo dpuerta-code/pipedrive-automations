@@ -236,6 +236,13 @@ def composio_execute(tool_slug, arguments, _retries=3):
             return response["data"]
         except (KeyError, TypeError, requests.RequestException) as e:
             last_error = e
+            # DEBUG TEMPORAL (quitar una vez diagnosticado el 'data' KeyError
+            # que solo reproduce en GitHub Actions, no localmente via curl):
+            print(f"    [DEBUG] intento {attempt+1} fallo con {type(e).__name__}: {e}")
+            try:
+                print(f"    [DEBUG] resp crudo: {json.dumps(resp)[:2000]}")
+            except Exception as debug_err:
+                print(f"    [DEBUG] no se pudo serializar resp: {debug_err} | resp={resp!r}"[:2000])
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
 
