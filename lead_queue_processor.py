@@ -284,6 +284,25 @@ def load_rotation_map():
     return rotation_map
 
 
+def load_email_owner_map():
+    """Lee el tab Rotacion y arma {owner_email: owner_id}, deduplicado (el
+    mismo BDR siempre tiene el mismo owner_id en Pipedrive sin importar la
+    semana). Se usa para que el Lead quede asignado a quien dio click en
+    Metabase (columna clicked_by_email), en vez de a la rotacion semanal
+    por territorio."""
+    _, records = sheet_get_records(ROTATION_TAB)
+    email_owner_map = {}
+    for row in records:
+        email = str(row.get("owner_email", "")).strip().lower()
+        try:
+            owner_id = int(row.get("owner_id"))
+        except (TypeError, ValueError):
+            continue
+        if email:
+            email_owner_map[email] = owner_id
+    return email_owner_map
+
+
 def get_territory_owner(rotation_map, territorio):
     """owner_id para el territorio en la semana actual, o FALLBACK_OWNER_ID si
     el territorio esta vacio en la rotacion de esta semana (o es desconocido)."""
@@ -293,6 +312,18 @@ def get_territory_owner(rotation_map, territorio):
         return FALLBACK_OWNER_ID
     monday = current_week_monday().isoformat()
     return rotation_map.get((monday, territorio), FALLBACK_OWNER_ID)
+
+
+def resolve_owner_id(rotation_map, email_owner_map, row):
+    """El Lead debe quedar asignado a quien hizo click en Metabase
+    (clicked_by_email), no al territorio. Fallback a la rotacion semanal por
+    territorio solo si la fila no trae clicked_by_email (filas viejas, de
+    antes de que esa columna existiera) o si ese email no esta en el roster
+    de Rotacion (ej. alguien fuera del equipo de BDRs)."""
+    clicked_by = str(row.get("clicked_by_email", "")).strip().lower()
+    if clicked_by and clicked_by in email_owner_map:
+        return email_owner_map[clicked_by]
+    return get_territory_owner(rotation_map, row.get("territorio"))
 
 
 def existing_program_lead(org_id, person_id=None):
@@ -527,7 +558,7 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
     return lead_id, person_id
 
 
-def process_mark_campaign(row, rotation_map):
+def process_mark_campaign(row, rotation_map, email_owner_map):
     org_id = int(row["org_id"])
     sheet_company = row["sheet_company"]
     org_category = row.get("org_category") or "Coverage"
@@ -540,7 +571,7 @@ def process_mark_campaign(row, rotation_map):
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
     company_size = row.get("company_size", "")
-    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+    owner_id = resolve_owner_id(rotation_map, email_owner_map, row)
 
     lead_id, person_id = ensure_lead_and_campaing(
         org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin, owner_id,
@@ -549,7 +580,7 @@ def process_mark_campaign(row, rotation_map):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def process_create_lead_no_campaign(row, rotation_map):
+def process_create_lead_no_campaign(row, rotation_map, email_owner_map):
     """Para orgs Coverage ya matcheadas con un contacto nuevo (Contacto_Estado
     = 'New') cuando NO se quiere mandar a campaña todavia: busca o crea la
     Persona dentro de la organizacion existente y crea el Lead del programa,
@@ -565,7 +596,7 @@ def process_create_lead_no_campaign(row, rotation_map):
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
     company_size = row.get("company_size", "")
-    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+    owner_id = resolve_owner_id(rotation_map, email_owner_map, row)
 
     if not TEST_MODE:
         enrich_existing_org(org_id, domain, website, org_linkedin, company_size)
@@ -596,7 +627,7 @@ def process_create_lead_no_campaign(row, rotation_map):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
+def process_create_org_lead(row, rotation_map, email_owner_map, mark_campaign_after=False):
     """Crea Organizacion + Persona + Lead (con chequeo de duplicados).
     mark_campaign_after=True se usa cuando esta creacion se disparo desde el
     link "Marcar Campaña" en una fila Posible New (ahi si se marca Campaing=Yes).
@@ -613,7 +644,7 @@ def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
     domain = row.get("domain", "")
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
-    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+    owner_id = resolve_owner_id(rotation_map, email_owner_map, row)
 
     name_match = find_org_by_name(sheet_company)
     if name_match:
@@ -768,6 +799,7 @@ def main():
 
     header, records = sheet_get_records(QUEUE_TAB)
     rotation_map = load_rotation_map()
+    email_owner_map = load_email_owner_map()
 
     pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
     print(f"Filas pendientes: {len(pending)}\n")
@@ -786,13 +818,13 @@ def main():
                     # asi que "Marcar Campaña" crea Org+Persona+Lead Y marca
                     # Campaing=Yes (a diferencia de "Crear Org + Lead", que
                     # crea todo pero NO marca Campaing).
-                    result = process_create_org_lead(row, rotation_map, mark_campaign_after=True)
+                    result = process_create_org_lead(row, rotation_map, email_owner_map, mark_campaign_after=True)
                 else:
-                    result = process_mark_campaign(row, rotation_map)
+                    result = process_mark_campaign(row, rotation_map, email_owner_map)
             elif action == "create_org_lead":
-                result = process_create_org_lead(row, rotation_map)
+                result = process_create_org_lead(row, rotation_map, email_owner_map)
             elif action == "create_lead_no_campaign":
-                result = process_create_lead_no_campaign(row, rotation_map)
+                result = process_create_lead_no_campaign(row, rotation_map, email_owner_map)
             elif action == "empresa_no_sirve":
                 result = process_empresa_no_sirve(row)
             elif action == "persona_no_sirve":
