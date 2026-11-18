@@ -209,14 +209,18 @@ def _mcp_ensure_session():
     _mcp_request("notifications/initialized")
 
 
-def composio_execute(tool_slug, arguments, _retries=3):
+def composio_execute(tool_slug, arguments, _retries=5):
     """Ejecuta una accion de Composio (Google Sheets) via el endpoint MCP,
     reusando la conexion de Google ya autorizada en Composio — evita
     depender de un service account de Google Cloud.
 
     El endpoint MCP de Composio a veces devuelve una respuesta vacia/sin
     'result' de forma transitoria; se reintenta unas pocas veces antes de
-    fallar de verdad."""
+    fallar de verdad. La API de Google Sheets tiene ademas una cuota de
+    lecturas por minuto compartida por la conexion -- si se excede (429,
+    'Quota exceeded ... Read requests per minute'), se espera con backoff
+    largo (lo suficiente para que la ventana de 1 minuto se libere) en vez
+    de fallar de inmediato."""
     last_error = None
     for attempt in range(_retries):
         try:
@@ -228,7 +232,14 @@ def composio_execute(tool_slug, arguments, _retries=3):
             content = resp["result"]["content"][0]["text"]
             payload = json.loads(content)
             if payload.get("error"):
-                raise RuntimeError(f"Composio error ({tool_slug}): {payload['error']}")
+                err_msg = str(payload["error"])
+                if "Quota exceeded" in err_msg or "429" in err_msg:
+                    last_error = RuntimeError(f"Composio error ({tool_slug}): {err_msg}")
+                    wait = 20 * (attempt + 1)
+                    print(f"    [rate limit] {tool_slug}: cuota de Sheets excedida, esperando {wait}s (intento {attempt+1}/{_retries})")
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"Composio error ({tool_slug}): {err_msg}")
             result = payload["data"]["results"][0]
             response = result["response"]
             if not response.get("successful"):
