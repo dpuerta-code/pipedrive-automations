@@ -285,7 +285,7 @@ def main():
 
     seen_emails = set()
     stats = {"enrolled": 0, "already_active": 0, "no_sequence": 0, "logo_type_excluded": 0,
-             "too_old": 0, "no_signals": 0, "no_email": 0, "duplicate": 0, "errors": 0}
+             "too_old": 0, "no_csv_enrichment": 0, "no_email": 0, "duplicate": 0, "errors": 0}
     backup = []
 
     for lead in leads:
@@ -343,13 +343,17 @@ def main():
 
         typed_custom_fields = None
         if sequence_id in SEQUENCES_REQUIRING_SIGNALS:
+            # slang_senal viene directo de Pipedrive; siempre disponible si llegamos aquí
+            senal_value = lead.get(LEAD_SLANG_SENAL_KEY, "")
+            typed_custom_fields = {SLANG_FIELD_IDS["slang_senal"]: senal_value}
+            # Enriquecer con los demás campos del CSV si están disponibles (no bloquea)
             row = signals.get(email)
-            if not row or not row.get("slang_senal"):
-                print(f"  SKIP '{title}' ({email}): sin señales de personalización en la hoja "
-                      f"(requeridas para Motor BDR, se saltaria el correo roto)")
-                stats["no_signals"] += 1
-                continue
-            typed_custom_fields = {SLANG_FIELD_IDS[k]: row[k] for k in SLANG_FIELD_IDS if row.get(k)}
+            if row:
+                for k in SLANG_FIELD_IDS:
+                    if k != "slang_senal" and row.get(k):
+                        typed_custom_fields[SLANG_FIELD_IDS[k]] = row[k]
+            else:
+                stats["no_csv_enrichment"] += 1
 
         org_name = title  # el titulo del lead ya suele llevar el nombre de la org
         full_name = person.get("name", "")
