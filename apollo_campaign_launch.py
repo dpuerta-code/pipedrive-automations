@@ -61,8 +61,11 @@ def _prev_business_day():
 
 LEAD_CREATED_SINCE = os.environ.get("LEAD_CREATED_SINCE") or max(_prev_business_day(), LEAD_CREATED_FLOOR)
 
-# Lead field "Slang Senal" — si está presente, va a Signal; si no, a Automática.
+# Lead field "Slang Senal" — si está presente, va a Signal.
 LEAD_SLANG_SENAL_KEY = "5c1c0fa20e8a80b4847ad89958ec2aacedcb5399"
+
+# Leads cuyo canal (campo nativo "channel") sea Org Scoring también van a Signal.
+ORG_SCORING_CHANNEL = 1431
 
 # Org field "Logo Type" (ver memoria project_pipedrive_logo_type_champion_ironman).
 # OJO: Pipedrive devuelve el valor de este campo como STRING ("313"), no como int.
@@ -148,8 +151,8 @@ def apollo_get(endpoint, params=None):
 
 
 def resolve_sequence(lead):
-    """Devuelve (sequence_id, None). Signal si tiene Slang Senal; Automática si no."""
-    if lead.get(LEAD_SLANG_SENAL_KEY):
+    """Signal si tiene Slang Senal o viene de Org Scoring; Automática si no."""
+    if lead.get(LEAD_SLANG_SENAL_KEY) or lead.get("channel") == ORG_SCORING_CHANNEL:
         return SEQ_SIGNAL, None
     return SEQ_AUTOMATICA, None
 
