@@ -236,13 +236,6 @@ def composio_execute(tool_slug, arguments, _retries=3):
             return response["data"]
         except (KeyError, TypeError, requests.RequestException) as e:
             last_error = e
-            # DEBUG TEMPORAL (quitar una vez diagnosticado el 'data' KeyError
-            # que solo reproduce en GitHub Actions, no localmente via curl):
-            print(f"    [DEBUG] intento {attempt+1} fallo con {type(e).__name__}: {e}")
-            try:
-                print(f"    [DEBUG] resp crudo: {json.dumps(resp)[:2000]}")
-            except Exception as debug_err:
-                print(f"    [DEBUG] no se pudo serializar resp: {debug_err} | resp={resp!r}"[:2000])
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
 
@@ -257,22 +250,56 @@ def col_letter(idx0):
     return letters
 
 
-def sheet_get_records(sheet_name):
-    """Lee todas las filas de un tab como (header, lista de dicts), igual que
-    gspread's get_all_records()."""
-    data = composio_execute("GOOGLESHEETS_BATCH_GET", {
-        "spreadsheet_id": QUEUE_SPREADSHEET_ID,
-        "ranges": [f"{sheet_name}!A1:Z2000"],
+# Filas por llamada al leer un tab completo. Un solo GOOGLESHEETS_BATCH_GET
+# sobre un tab grande (ej. Sheet1 de la Cola de Leads con 238+ filas x 26
+# columnas) supera el limite de tamaño de respuesta de Composio (~15k
+# tokens) y vuelve truncado -- "data_preview" en vez de "data" real, con el
+# payload completo guardado en un sandbox remoto al que este script (corre
+# en GitHub Actions, no en el sandbox de Composio) no tiene forma de acceder.
+# Se pagina en bloques chicos para que cada respuesta individual quede
+# siempre muy por debajo de ese limite, sin importar cuanto crezca el tab.
+SHEET_READ_CHUNK_ROWS = 100
+
+
+def _sheet_get_records_paginated(spreadsheet_id, sheet_name, last_col, max_rows=5000):
+    """Lee un tab completo en bloques de SHEET_READ_CHUNK_ROWS filas y lo
+    arma como (header, lista de dicts), igual que gspread's
+    get_all_records()."""
+    header_data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+        "spreadsheet_id": spreadsheet_id,
+        "ranges": [f"{sheet_name}!A1:{last_col}1"],
     })
-    values = data["valueRanges"][0].get("values", [])
-    if not values:
+    header_values = header_data["valueRanges"][0].get("values", [])
+    if not header_values:
         return [], []
-    header = values[0]
+    header = header_values[0]
+
+    all_rows = []
+    start_row = 2
+    while start_row <= max_rows:
+        end_row = start_row + SHEET_READ_CHUNK_ROWS - 1
+        data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+            "spreadsheet_id": spreadsheet_id,
+            "ranges": [f"{sheet_name}!A{start_row}:{last_col}{end_row}"],
+        })
+        values = data["valueRanges"][0].get("values", [])
+        if not values:
+            break
+        all_rows.extend(values)
+        if len(values) < SHEET_READ_CHUNK_ROWS:
+            break
+        start_row = end_row + 1
+
     records = []
-    for row in values[1:]:
+    for row in all_rows:
         row = row + [""] * (len(header) - len(row))
         records.append(dict(zip(header, row)))
     return header, records
+
+
+def sheet_get_records(sheet_name):
+    """Igual que _sheet_get_records_paginated, contra la Cola de Leads."""
+    return _sheet_get_records_paginated(QUEUE_SPREADSHEET_ID, sheet_name, last_col="Z")
 
 
 def current_week_monday():
@@ -734,20 +761,9 @@ def process_create_org_lead(row, rotation_map, email_owner_map, mark_campaign_af
 
 def sheet_get_records_from(spreadsheet_id, sheet_name):
     """Igual que sheet_get_records pero contra un spreadsheet_id arbitrario
-    (Motor BDR vive en una hoja distinta a la Cola de Leads)."""
-    data = composio_execute("GOOGLESHEETS_BATCH_GET", {
-        "spreadsheet_id": spreadsheet_id,
-        "ranges": [f"{sheet_name}!A1:AE2000"],
-    })
-    values = data["valueRanges"][0].get("values", [])
-    if not values:
-        return [], []
-    header = values[0]
-    records = []
-    for row in values[1:]:
-        row = row + [""] * (len(header) - len(row))
-        records.append(dict(zip(header, row)))
-    return header, records
+    (Motor BDR vive en una hoja distinta a la Cola de Leads, y tiene todavia
+    mas filas -- tambien paginado por la misma razon)."""
+    return _sheet_get_records_paginated(spreadsheet_id, sheet_name, last_col="AE")
 
 
 NO_SIRVE_NOTE = "No sirve - excluido"
