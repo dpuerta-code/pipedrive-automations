@@ -1,39 +1,29 @@
 #!/usr/bin/env python3
 """
 Enrola en una secuencia de Apollo todos los Leads de Pipedrive con
-Organization Category = Coverage o New (ya no se exige Campaing=Yes; ver
-memoria/PR del 2026-09-22 -- el campo Campaing se deja de usar como gate).
+Organization Category = Coverage o New.
 
-La secuencia destino depende de "Organization Category" + "Source channel" del lead:
-  - Source channel = Org Scoring:
-      Organization Category = New      -> Motor BDR - SL·NEW
-      Organization Category = Coverage -> Motor BDR - SL·REACT
-      (Comeback / Marketing -> sin secuencia, se saltan)
-  - Cualquier otro Source channel:
-      Organization Category = Coverage -> Coverage {País} (MX/CL/Colombia, o LATAM si el país
-                                            no tiene secuencia propia)
-      (Comeback / New / Marketing -> sin secuencia, se saltan)
+La secuencia destino depende del campo "Slang Senal" del lead en Pipedrive:
+  - Slang Senal presente -> BDR Campaign (Signal)
+  - Slang Senal ausente  -> BDR Campaign (Automática)
 
-Ademas, se salta cualquier lead cuya organizacion tenga el campo "Logo Type" = Ironman,
-Champion o Target MX Champion (ids 313/314/1418), sin importar la categoria/canal.
+No hay diferenciación de país ni de canal.
 
-Se salta cualquier lead creado ANTES de LEAD_CREATED_SINCE (ver constante abajo) -- al
-quitar el gate de Campaing=Yes, el pool de leads elegibles crecio de golpe (~17-19/dia a
-~370+ en un solo run); este filtro de fecha evita re-contactar leads viejos que ya podrian
-tener historial de correos previo, limitando el primer alcance a leads recien creados.
+La campaña Signal usa variables de personalización por contacto
+({{contact.Slang Ciudad}}, {{contact.Slang Senal}}, etc.) que vienen de la hoja
+"Prospección Slang" (Google Sheets). Ese contenido se busca por email en
+prospeccion_signals.csv (snapshot local); si un lead va a Signal y no aparece
+ahí, se salta -- mejor no enrolar que mandar un correo con la variable vacía.
+La campaña Automática solo usa {{first_name}}/{{company}}, no requiere señales.
 
-Las secuencias Motor BDR (SL·NEW y SL·REACT) usan variables de personalizacion por contacto
-({{contact.Slang Ciudad}}, {{contact.Slang Senal}}, etc, ver plantillas en Apollo) que vienen
-de la hoja "Prospección Slang" (Google Sheets). Ese contenido se busca por email en
-prospeccion_signals.csv (snapshot local, ver nota en el propio archivo); si un lead va para
-Motor BDR y no aparece ahi, se salta -- mejor no enrolar que mandar un correo con la variable
-vacia o el texto literal "{{contact.Slang X}}". Las 4 secuencias Coverage no lo necesitan,
-solo usan {{first_name}}/{{company}}/{{account.name}}, que siempre se llenan.
+Ademas, se salta cualquier lead cuya organización tenga el campo "Logo Type" =
+Ironman, Champion o Target MX Champion (ids 313/314/1418).
 
-No se guardan campos nuevos en Pipedrive (contact_id/sequence_id/fecha de envío). El cruce
-Apollo<->Pipedrive es siempre por email. La idempotencia la maneja Apollo: POST /contacts con
-run_dedupe=true devuelve el contacto existente si el email ya está en Apollo, y
-add_contact_ids salta (sin error) contactos que ya están activos en esa secuencia.
+Se salta cualquier lead creado ANTES de LEAD_CREATED_SINCE.
+
+No se guardan campos nuevos en Pipedrive. El cruce Apollo<->Pipedrive es por
+email. La idempotencia la maneja Apollo: POST /contacts con run_dedupe=true
+devuelve el contacto existente, y add_contact_ids salta contactos ya activos.
 
 TEST_MODE=true  -> solo lectura, no llama a Apollo (default).
 Cron GitHub Actions: lunes a viernes.
@@ -61,40 +51,22 @@ ORG_CATEGORY_FILTER_ID = 71609
 # add_time del lead). Evita re-contactar leads viejos ahora que no hay gate de Campaing=Yes.
 LEAD_CREATED_SINCE = os.environ.get("LEAD_CREATED_SINCE", "2026-09-18")
 
-ORG_CAT_KEY = "fafdb80a27427f23c8f72675767e616461f056cb"
-CHANNEL_KEY = "channel"  # campo nativo "Source channel"
+# Lead field "Slang Senal" — si está presente, va a Signal; si no, a Automática.
+LEAD_SLANG_SENAL_KEY = "5c1c0fa20e8a80b4847ad89958ec2aacedcb5399"
 
 # Org field "Logo Type" (ver memoria project_pipedrive_logo_type_champion_ironman).
-# OJO: Pipedrive devuelve el valor de este campo como STRING ("313"), no como int -- comparar
-# siempre como string (mismo bug ya documentado en esa memoria para el campo Country).
+# OJO: Pipedrive devuelve el valor de este campo como STRING ("313"), no como int.
 ORG_LOGO_TYPE_KEY = "b5a5290a565880a732f018c364e182719520bdd2"
 LOGO_TYPE_EXCLUDED = {"313", "314", "1418"}  # Ironman, Champion, Target MX Champion
 
-ORG_SCORING_CHANNEL = 1431
-COMEBACK = 1215
-COVERAGE = 1216
-NEW = 1217
-MARKETING = 1218
-
-SEQ_NEW = "6a53f346a203ac0013560c86"  # Motor BDR - SL·NEW
-SEQ_REACT = "6a53f362a203ac000ce374f3"  # Motor BDR - SL·REACT
-SEQ_COVERAGE_MX = "69cd6e73276e4f00111247a4"
-SEQ_COVERAGE_CL = "69d518168f9bb3002149790d"
-SEQ_COVERAGE_COLOMBIA = "69d3ae9434d0330021a63fbc"
-SEQ_COVERAGE_LATAM = "69d6ae5d10d96f0011bc571b"
-
-COUNTRY_SEQ = {
-    "Mexico": SEQ_COVERAGE_MX,
-    "Chile": SEQ_COVERAGE_CL,
-    "Colombia": SEQ_COVERAGE_COLOMBIA,
-}
+SEQ_SIGNAL    = "6af76120a1d695000c2cc894"  # BDR Campaign (Signal)
+SEQ_AUTOMATICA = "6af764474fc963000c6e4408"  # BDR Campaign (Automática)
 
 # Mailbox de envío por defecto (a.rozo@slangapp.com, default:true en /email_accounts)
 SEND_FROM_EMAIL_ACCOUNT_ID = "674e10be0c6c6d02cf03f630"
 
-# Secuencias que requieren las variables de personalizacion "Slang X" (ver mas abajo).
-# Las 4 Coverage NO las usan (solo {{first_name}}/{{company}}/{{account.name}}), no necesitan lookup.
-SEQUENCES_REQUIRING_SIGNALS = {SEQ_NEW, SEQ_REACT}
+# Signal requiere variables de personalización del CSV; Automática no.
+SEQUENCES_REQUIRING_SIGNALS = {SEQ_SIGNAL}
 
 # Campos custom de contacto en Apollo usados como merge tags {{contact.Slang X}} en las
 # plantillas de Motor BDR. IDs obtenidos via apollo_fields_index (modality=contact).
@@ -165,39 +137,11 @@ def apollo_get(endpoint, params=None):
     return r.json()
 
 
-def country_from_title(title):
-    """Heurística por sufijo de nombre (más confiable que el campo Country, ver memoria
-    project_pipedrive_logo_type_champion_ironman: casos donde Country venía mal para la org)."""
-    t = (title or "").lower()
-    if t.strip().endswith(" mx") or " mx " in f" {t} ":
-        return "Mexico"
-    mapping = {"mexico": "Mexico", "méxico": "Mexico", "colombia": "Colombia", "chile": "Chile"}
-    for k, v in mapping.items():
-        if k in t:
-            return v
-    return None
-
-
-def resolve_sequence(org_category, channel, title):
-    """Devuelve (sequence_id, skip_reason). Si skip_reason no es None, no se enrola."""
-    if org_category == COMEBACK:
-        return None, "comeback_sin_secuencia"
-    if org_category == MARKETING:
-        return None, "marketing_sin_mapeo"
-
-    is_org_scoring = channel == ORG_SCORING_CHANNEL
-
-    if is_org_scoring:
-        if org_category == NEW:
-            return SEQ_NEW, None
-        if org_category == COVERAGE:
-            return SEQ_REACT, None
-        return None, "combinacion_sin_mapeo"
-
-    if org_category in (COVERAGE, NEW):
-        country = country_from_title(title)
-        return COUNTRY_SEQ.get(country, SEQ_COVERAGE_LATAM), None
-    return None, "combinacion_sin_mapeo"
+def resolve_sequence(lead):
+    """Devuelve (sequence_id, None). Signal si tiene Slang Senal; Automática si no."""
+    if lead.get(LEAD_SLANG_SENAL_KEY):
+        return SEQ_SIGNAL, None
+    return SEQ_AUTOMATICA, None
 
 
 def get_eligible_leads():
@@ -339,15 +283,13 @@ def main():
         person_id = extract_id(lead.get("person_id"))
         org_id = extract_id(lead.get("organization_id"))
         owner_id = extract_id(lead.get("owner_id"))
-        org_category = lead.get(ORG_CAT_KEY)
-        channel = lead.get(CHANNEL_KEY)
         add_time = lead.get("add_time") or ""
 
         if add_time[:10] < LEAD_CREATED_SINCE:
             stats["too_old"] += 1
             continue
 
-        sequence_id, skip_reason = resolve_sequence(org_category, channel, title)
+        sequence_id, skip_reason = resolve_sequence(lead)
         if skip_reason:
             stats["no_sequence"] += 1
             continue
