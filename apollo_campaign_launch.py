@@ -34,7 +34,7 @@ import json
 import os
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PIPEDRIVE_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 PIPEDRIVE_BASE = "https://slang.pipedrive.com/api/v1"
@@ -48,8 +48,18 @@ TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 ORG_CATEGORY_FILTER_ID = 71609
 
 # Solo se enrolan leads creados en/despues de esta fecha (YYYY-MM-DD, se compara contra
-# add_time del lead). Evita re-contactar leads viejos ahora que no hay gate de Campaing=Yes.
-LEAD_CREATED_SINCE = os.environ.get("LEAD_CREATED_SINCE", "2026-09-18")
+# add_time del lead). Default: dia habil anterior (el cron corre lunes-viernes a las 5am
+# Colombia; el lunes toma el viernes, etc.). Piso: 2026-11-19 — no se tocan leads anteriores.
+# Se puede sobreescribir via env var LEAD_CREATED_SINCE para backfills manuales.
+LEAD_CREATED_FLOOR = "2026-11-19"
+
+def _prev_business_day():
+    d = datetime.now(timezone.utc).date() - timedelta(days=1)
+    while d.weekday() >= 5:  # 5=sabado, 6=domingo
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+LEAD_CREATED_SINCE = os.environ.get("LEAD_CREATED_SINCE") or max(_prev_business_day(), LEAD_CREATED_FLOOR)
 
 # Lead field "Slang Senal" — si está presente, va a Signal; si no, a Automática.
 LEAD_SLANG_SENAL_KEY = "5c1c0fa20e8a80b4847ad89958ec2aacedcb5399"
