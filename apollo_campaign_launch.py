@@ -75,8 +75,10 @@ LOGO_TYPE_EXCLUDED = {"313", "314", "1418"}  # Ironman, Champion, Target MX Cham
 SEQ_SIGNAL    = "6af76120a1d695000c2cc894"  # BDR Campaign (Signal)
 SEQ_AUTOMATICA = "6af764474fc963000c6e4408"  # BDR Campaign (Automática)
 
-# Mailbox de envío por defecto (a.rozo@slangapp.com, default:true en /email_accounts)
-SEND_FROM_EMAIL_ACCOUNT_ID = "674e10be0c6c6d02cf03f630"
+# Mailbox de envío por defecto — siempre @slangprogram.com.
+# Se intenta primero el mailbox del owner (local-part@slangprogram.com); si no existe,
+# cae aquí: a.rozo@slangprogram.com (id obtenido via /email_accounts).
+SEND_FROM_EMAIL_ACCOUNT_ID = "69d56166f2c8e200192f4384"  # a.rozo@slangprogram.com
 
 # Signal requiere variables de personalización del CSV; Automática no.
 SEQUENCES_REQUIRING_SIGNALS = {SEQ_SIGNAL}
@@ -206,20 +208,16 @@ def get_apollo_mailboxes():
 
 def resolve_sender_account_id(owner_id, apollo_mailboxes):
     """
-    Manda desde el mailbox Apollo del owner del lead en Pipedrive. Los owners usan
-    @slangapp.com en Pipedrive; en Apollo los mailboxes de envio suelen estar en
-    @slangprogram.com con el mismo local-part (mismo patron para todos menos a.rozo,
-    que ademas tiene un mailbox exacto en @slangapp.com). Si no hay match de ningun tipo,
-    cae al mailbox default.
+    Siempre envía desde @slangprogram.com. Toma el local-part del email del owner en
+    Pipedrive y busca <local-part>@slangprogram.com en Apollo. Si no hay match, cae al
+    default (a.rozo@slangprogram.com).
     """
     owner_email = get_pipedrive_user_email(owner_id) if owner_id else None
     if owner_email:
-        if owner_email in apollo_mailboxes:
-            return apollo_mailboxes[owner_email], owner_email
         local_part = owner_email.split("@", 1)[0]
-        alt_email = f"{local_part}@slangprogram.com"
-        if alt_email in apollo_mailboxes:
-            return apollo_mailboxes[alt_email], alt_email
+        slangprogram_email = f"{local_part}@slangprogram.com"
+        if slangprogram_email in apollo_mailboxes:
+            return apollo_mailboxes[slangprogram_email], slangprogram_email
     return SEND_FROM_EMAIL_ACCOUNT_ID, None
 
 
