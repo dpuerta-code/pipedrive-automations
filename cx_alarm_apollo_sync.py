@@ -40,7 +40,7 @@ SPREADSHEET_ID = "1dUdBalYRvhwWpYkPxlYmWVOMGYVpxI3wry7_J4Bwzx0"  # Campanas CX -
 SHEET_RANGE = "A1:Z2000"  # sin nombre de tab -> aplica a la primera hoja visible
 
 APOLLO_SEQUENCE_ID = "6af4cc55a3e9b80018ca768c"  # CX - Alarma Ejecutiva (Ausencias)
-SEND_FROM_EMAIL_ACCOUNT_ID = "674e10be0c6c6d02cf03f630"  # a.rozo@slangapp.com
+SEND_FROM_EMAIL_ACCOUNT_ID = "6afe0fb16964350020fb6d8f"  # m.mendoza@slangapp.com
 
 PROCESADO_COL = "Procesado"
 APOLLO_ID_COL = "Apollo Contact ID"
