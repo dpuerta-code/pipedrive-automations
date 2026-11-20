@@ -2,7 +2,7 @@ name: Overdue Activity Priority
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # Todos los dias 7am Colombia (UTC-5 -> 12:00 UTC)
+    - cron: "19 9 * * *"   # Todos los dias ~4am Colombia (UTC-5 -> 09:19 UTC). Antes era 7am en punto (12:00 UTC), pero GitHub Actions lo retrasaba 3-5 horas (hora de mayor congestion); se adelanta y se usa un minuto fuera de punta.
   workflow_dispatch:
     inputs:
       test_mode:
