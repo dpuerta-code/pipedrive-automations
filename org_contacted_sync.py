@@ -446,15 +446,13 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache, le
 
 def reset_on_owner_change(active_leads, org_cache, owner_cache):
     """Paso 0: detecta leads cuyo owner cambió desde la última corrida.
-    Para cada uno: limpia el CONTACT_DATE_KEY del lead y el FCD de su org,
-    para que Paso 2 los revalúe con el nuevo owner.
-    Solo actúa si el lead ya tenía FCD (leads pendientes no necesitan reset).
+    Limpia CONTACT_DATE_KEY del lead (si lo tenía) y el FCD de la org,
+    siempre que el owner haya cambiado — sin importar el gap de 60 días.
+    Un cambio de owner siempre inicia una nueva sesión de prospección.
     """
     resets = 0
     seen_orgs = set()
     for lead in active_leads:
-        if not lead.get(CONTACT_DATE_KEY):
-            continue  # pendiente → Paso 2 se encarga, no necesita reset
         lead_id = str(lead["id"])
         current_owner = extract_id(lead.get("owner_id"))
         cached_owner = owner_cache.get(lead_id)
@@ -463,17 +461,20 @@ def reset_on_owner_change(active_leads, org_cache, owner_cache):
 
         org_id = lead["organization_id"]
         title = lead.get("title", "?")
-        print(f"  Owner cambió en lead '{title}' ({lead_id}): {cached_owner} → {current_owner}")
+        had_fcd = bool(lead.get(CONTACT_DATE_KEY))
+        print(f"  Owner cambió en lead '{title}' ({lead_id}): {cached_owner} → {current_owner}"
+              + (" (tenía FCD)" if had_fcd else " (sin FCD)"))
 
         if not TEST_MODE:
-            # Limpiar FCD del lead
-            try:
-                api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: None})
-            except Exception as e:
-                print(f"    ERROR limpiando FCD del lead: {e}")
-                continue
+            # Limpiar FCD del lead si lo tenía
+            if had_fcd:
+                try:
+                    api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: None})
+                except Exception as e:
+                    print(f"    ERROR limpiando FCD del lead: {e}")
+                    continue
 
-            # Limpiar FCD de la org (solo una vez por org por corrida)
+            # Limpiar FCD de la org siempre que cambie el owner (aunque gap < 60d)
             if org_id not in seen_orgs:
                 seen_orgs.add(org_id)
                 if org_id not in org_cache:
@@ -493,7 +494,7 @@ def reset_on_owner_change(active_leads, org_cache, owner_cache):
                     except Exception as e:
                         print(f"    ERROR limpiando FCD de org {org_id}: {e}")
         else:
-            print(f"    [TEST] Limpiaría FCD del lead y de org {org_id}")
+            print(f"    [TEST] Limpiaría FCD del lead{' y' if had_fcd else ' (sin FCD) y'} org {org_id}")
 
         resets += 1
 
