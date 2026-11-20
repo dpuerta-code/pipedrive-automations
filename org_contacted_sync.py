@@ -29,7 +29,7 @@ import json
 import os
 import requests
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
