@@ -44,6 +44,7 @@ OUTBOUND_TYPE_BY_TOUCH = {1: "outbound_connection_1", 2: "outbound_connection_2"
 MAX_TOUCH = 3
 
 AIRCALL_PREFIX = "aircall_"
+CALL_MANUAL_COLOMBIA = "call_manual_colombia"
 TOQUE_RE = re.compile(r"^Toque (\d+) - ")
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
@@ -126,7 +127,7 @@ def next_touch_target(lead_activities):
             continue
         n = int(m.group(1))
         t = a.get("type") or ""
-        if t.startswith(AIRCALL_PREFIX):
+        if t.startswith(AIRCALL_PREFIX) or t == CALL_MANUAL_COLOMBIA:
             aircall_touches.add(n)
         elif t == "whatsapp":
             whatsapp_touches.add(n)

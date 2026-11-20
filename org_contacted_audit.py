@@ -38,6 +38,7 @@ CONTACT_ACTIVITY_TYPES = {
     "aircall_missed_call_withou",
     "aircall_inbound_whatsapp_m",
     "aircall_outbound_whatsapp_",
+    "call_manual_colombia",
 }
 
 request_count = 0

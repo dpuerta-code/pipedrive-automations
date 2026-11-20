@@ -42,6 +42,7 @@ API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
 
 AIRCALL_PREFIX = "aircall_"
+CALL_MANUAL_COLOMBIA = "call_manual_colombia"
 DIIO_SUBJECT = "Whatsapp Message Diio"
 DIIO_NOTE_TRIGGER = "detalle de la conversación escrita de Whatsapp"
 TOQUE_PREFIX_RE = re.compile(r"^Toque \d+ - ")
@@ -173,8 +174,10 @@ def main():
             activities_cache[pid] = get_person_activities(pid)
         acts = activities_cache[pid]
 
-        aircall_matches = [a for a in acts if (a.get("type") or "").startswith(AIRCALL_PREFIX)
-                           and a.get("lead_id") == lead_id]
+        aircall_matches = [a for a in acts if (
+                               (a.get("type") or "").startswith(AIRCALL_PREFIX)
+                               or a.get("type") == CALL_MANUAL_COLOMBIA
+                           ) and a.get("lead_id") == lead_id]
 
         whatsapp_matches = []
         if pid in single_lead_persons:

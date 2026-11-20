@@ -71,10 +71,8 @@ CONTACT_ACTIVITY_TYPES = [
     "aircall_missed_call_withou",
     "aircall_inbound_whatsapp_m",
     "aircall_outbound_whatsapp_",
+    "call_manual_colombia",
 ]
-
-# Tipo condicional: solo cuenta si la actividad tiene nota Y la org es de Colombia
-CALL_MANUAL_COLOMBIA = "call_manual_colombia"
 
 _org_country_cache = {}
 
@@ -291,29 +289,6 @@ def fetch_recent_activity_dates_by_org(person_cache):
             else:
                 break
 
-    # Tipo condicional: call_manual_colombia — solo si tiene nota Y org es de Colombia
-    start = 0
-    while True:
-        resp = api_get("activities", {
-            "type": CALL_MANUAL_COLOMBIA, "user_id": 0, "limit": 500, "start": start,
-            "start_date": start_date, "end_date": end_date,
-        })
-        data = resp.get("data") or []
-        for a in data:
-            if not a.get("note"):
-                continue
-            org_id = get_org_id_from_activity(a, person_cache)
-            if not org_id or not is_colombia_org(org_id):
-                continue
-            d = a.get("marked_as_done_time") or a.get("add_time")
-            if d:
-                by_org.setdefault(org_id, []).append(d[:10])
-        pagination = resp.get("additional_data", {}).get("pagination", {})
-        if pagination.get("more_items_in_collection"):
-            start = pagination["next_start"]
-        else:
-            break
-
     return by_org
 
 
@@ -352,10 +327,6 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
             for a in (ar.get("data") or []):
                 t = a.get("type")
                 if t in CONTACT_ACTIVITY_TYPES:
-                    d = a.get("due_date") or (a.get("marked_as_done_time") or "")[:10]
-                    if d and len(d) >= 10:
-                        candidates.append(d[:10])
-                elif t == CALL_MANUAL_COLOMBIA and a.get("note") and is_colombia_org(org_id):
                     d = a.get("due_date") or (a.get("marked_as_done_time") or "")[:10]
                     if d and len(d) >= 10:
                         candidates.append(d[:10])
