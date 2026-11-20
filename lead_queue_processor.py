@@ -231,15 +231,15 @@ def composio_execute(tool_slug, arguments, _retries=5):
             })
             content = resp["result"]["content"][0]["text"]
             payload = json.loads(content)
-            if payload.get("error"):
-                err_msg = str(payload["error"])
-                if "Quota exceeded" in err_msg or "429" in err_msg:
-                    last_error = RuntimeError(f"Composio error ({tool_slug}): {err_msg}")
+            full_error_text = json.dumps(payload)
+            if payload.get("error") or "Quota exceeded" in full_error_text or "429" in full_error_text:
+                if "Quota exceeded" in full_error_text or "429" in full_error_text:
+                    last_error = RuntimeError(f"Composio error ({tool_slug}): {full_error_text[:500]}")
                     wait = 20 * (attempt + 1)
                     print(f"    [rate limit] {tool_slug}: cuota de Sheets excedida, esperando {wait}s (intento {attempt+1}/{_retries})")
                     time.sleep(wait)
                     continue
-                raise RuntimeError(f"Composio error ({tool_slug}): {err_msg}")
+                raise RuntimeError(f"Composio error ({tool_slug}): {payload['error']}")
             result = payload["data"]["results"][0]
             response = result["response"]
             if not response.get("successful"):
@@ -247,6 +247,15 @@ def composio_execute(tool_slug, arguments, _retries=5):
             return response["data"]
         except (KeyError, TypeError, requests.RequestException) as e:
             last_error = e
+            # DEBUG TEMPORAL -- quitar una vez diagnosticado el KeyError('data')
+            # intermitente que no reproduce localmente via curl.
+            try:
+                print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | payload={json.dumps(payload)[:1500]}")
+            except Exception:
+                try:
+                    print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | resp crudo={json.dumps(resp)[:1500]}")
+                except Exception as debug_err:
+                    print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | no se pudo serializar nada: {debug_err}")
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
 
