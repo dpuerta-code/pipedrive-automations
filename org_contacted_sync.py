@@ -344,8 +344,8 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
     page = 0
     try:
         while page < MAX_ACT_PAGES:
-            ar = api_get(f"organizations/{org_id}/activities",
-                         {"done": 1, "limit": 100, "start": act_start})
+            ar = api_get("activities",
+                         {"org_id": org_id, "done": 1, "limit": 100, "start": act_start})
             page += 1
             for a in (ar.get("data") or []):
                 t = a.get("type")
