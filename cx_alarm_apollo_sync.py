@@ -19,8 +19,16 @@ El Sheet se lee/escribe via Composio (reusa la conexion de Google Sheets
 ya autorizada ahi), igual que contact_auto_lead.py y lead_queue_processor.py
 -- evita depender de un service account de Google Cloud.
 
-TEST_MODE=true -> solo imprime que haria, no llama a Apollo ni escribe en
-el Sheet (default).
+Ademas, cada corrida refleja el estado (se envio la campana, que respondio)
+en bpa.cx_alarm_status (ClickHouse) por email, upsert via ReplacingMergeTree
+-- la query 6954 en Metabase hace LEFT JOIN contra esa tabla para mostrar
+"Envio campana" y "Que respondio" junto al boton "Enviar a Sheet". Como
+ReplacingMergeTree reemplaza la fila COMPLETA por version (no por columna),
+upsert_cx_alarm_status siempre relee el estado actual antes de escribir, para
+no pisar un campo que esta corrida no toco.
+
+TEST_MODE=true -> solo imprime que haria, no llama a Apollo, no escribe en
+el Sheet ni en ClickHouse (default).
 Cron GitHub Actions: todos los dias 10am Colombia.
 """
 
@@ -36,8 +44,15 @@ COMPOSIO_MCP_URL = "https://connect.composio.dev/mcp"
 APOLLO_API_KEY = os.environ["APOLLO_API_KEY"]
 APOLLO_BASE = "https://api.apollo.io/api/v1"
 
+CH_HOST = os.environ.get("CLICKHOUSE_HOST", "sql-clickhouse.clickhouse.com")
+CH_PORT = os.environ.get("CLICKHOUSE_PORT", "8443")
+CH_USER = os.environ.get("CLICKHOUSE_USER", "")
+CH_PASS = os.environ.get("CLICKHOUSE_PASSWORD", "")
+CH_BASE = f"https://{CH_HOST}:{CH_PORT}/"
+
 SPREADSHEET_ID = "1dUdBalYRvhwWpYkPxlYmWVOMGYVpxI3wry7_J4Bwzx0"  # Campanas CX - Executive Alarm System
 SHEET_RANGE = "A1:Z2000"  # sin nombre de tab -> aplica a la primera hoja visible
+RESPUESTAS_RANGE = "Respuestas!A1:C2000"
 
 APOLLO_SEQUENCE_ID = "6af4cc55a3e9b80018ca768c"  # CX - Alarma Ejecutiva (Ausencias)
 SEND_FROM_EMAIL_ACCOUNT_ID = "6afe0fb16964350020fb6d8f"  # m.mendoza@slangapp.com
@@ -142,6 +157,73 @@ def composio_execute(tool_slug, arguments, _retries=3):
             last_error = e
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
+
+
+def ch_get(sql):
+    r = requests.get(
+        CH_BASE,
+        params={"query": sql + " FORMAT JSONEachRow"},
+        auth=(CH_USER, CH_PASS),
+        timeout=60,
+    )
+    r.raise_for_status()
+    return [json.loads(line) for line in r.text.strip().splitlines() if line]
+
+
+def ch_execute(sql):
+    r = requests.post(CH_BASE, params={"query": sql}, auth=(CH_USER, CH_PASS), timeout=60)
+    r.raise_for_status()
+    return r.text
+
+
+def sql_escape(s):
+    return (s or "").replace("'", "''").replace("\n", " ").replace("\r", " ")
+
+
+def sql_value(v):
+    if v is None:
+        return "NULL"
+    if isinstance(v, int):
+        return str(v)
+    return f"'{sql_escape(str(v))}'"
+
+
+def upsert_cx_alarm_status(email, **fields):
+    """Relee el estado actual de `email` en bpa.cx_alarm_status y escribe una
+    fila nueva con los campos de `fields` sobrescritos (ReplacingMergeTree
+    reemplaza la fila completa por version, no por columna -- por eso hay que
+    rearmarla entera para no perder lo que esta corrida no toco)."""
+    current = {"procesado": 0, "apollo_contact_id": None, "ultima_respuesta": None, "fecha_respuesta": None}
+    rows = ch_get(f"SELECT * FROM bpa.cx_alarm_status FINAL WHERE email = '{sql_escape(email)}' LIMIT 1")
+    if rows:
+        current.update({k: rows[0].get(k) for k in current})
+    current.update(fields)
+
+    ch_execute(
+        "INSERT INTO bpa.cx_alarm_status (email, procesado, apollo_contact_id, ultima_respuesta, fecha_respuesta, updated_at) "
+        f"VALUES ('{sql_escape(email)}', {int(current['procesado'])}, "
+        f"{sql_value(current['apollo_contact_id'])}, {sql_value(current['ultima_respuesta'])}, "
+        f"{sql_value(current['fecha_respuesta'])}, now())"
+    )
+
+
+def get_respuestas():
+    try:
+        data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+            "spreadsheet_id": SPREADSHEET_ID,
+            "ranges": [RESPUESTAS_RANGE],
+        })
+    except RuntimeError:
+        return []  # la pestaña "Respuestas" aun no existe (nadie ha respondido)
+    values = data["valueRanges"][0].get("values", [])
+    if not values:
+        return []
+    header = values[0]
+    records = []
+    for row in values[1:]:
+        row = row + [""] * (len(header) - len(row))
+        records.append(dict(zip(header, row)))
+    return records
 
 
 def col_letter(idx0):
@@ -260,6 +342,7 @@ def main():
                 "value_input_option": "RAW",
                 "values": [["TRUE", contact_id]],
             })
+            upsert_cx_alarm_status(email, procesado=1, apollo_contact_id=contact_id)
             sent += 1
             print(f"  OK -> contacto Apollo {contact_id}")
         except Exception as e:
@@ -267,6 +350,27 @@ def main():
             print(f"  ERROR: {e}")
 
     print(f"\nListo. Enviados: {sent} | Ya procesados: {skipped} | Fallidos: {failed}")
+
+    respuestas = get_respuestas()
+    synced_respuestas = 0
+    for r in respuestas:
+        email = (r.get("Email") or "").strip()
+        if not email:
+            continue
+        if TEST_MODE:
+            print(f"[TEST MODE] sincronizaria respuesta de {email}: {r.get('Accion')}")
+            continue
+        try:
+            upsert_cx_alarm_status(
+                email,
+                ultima_respuesta=r.get("Accion") or None,
+                fecha_respuesta=r.get("Fecha de respuesta") or None,
+            )
+            synced_respuestas += 1
+        except Exception as e:
+            print(f"  ERROR sincronizando respuesta de {email}: {e}")
+
+    print(f"Respuestas sincronizadas a ClickHouse: {synced_respuestas}")
 
 
 if __name__ == "__main__":
