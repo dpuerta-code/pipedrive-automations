@@ -55,7 +55,7 @@ ORG_COUNT_ONE_OPTION = 1413   # "1"
 WINDOW_DAYS = 60        # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
 LOOKBACK_DAYS = 3       # cuantos dias hacia atras de actividad/prospeccion se revisan en cada corrida
 DEAL_LOOKBACK_DAYS = 2  # deals creados hace mas de N dias se ignoran en el Paso 3
-ARCHIVED_LOOKBACK_DAYS = 14  # leads archivados en los ultimos N dias tambien se procesan en Paso 2
+ARCHIVED_LOOKBACK_DAYS = 30  # leads archivados en los ultimos N dias tambien se procesan en Paso 2
 MAX_ACT_PAGES = 15      # tope de paginas al buscar actividades historicas de una org
 
 # BACKFILL_MODE: cuando es true, Paso 2 busca en todo el historial de la org
@@ -336,16 +336,19 @@ def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
 
 
 def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
-    """Busca la actividad de contacto más temprana dentro de ±WINDOW_DAYS del prosp_date,
-    leyendo todo el historial de la org (hasta MAX_ACT_PAGES páginas).
+    """Busca la actividad de contacto más temprana dentro de ±WINDOW_DAYS del prosp_date.
+    Usa /persons/{id}/activities (incluye actividades ligadas a leads, deals y org).
+    Fallback a /organizations/{id}/activities cuando no hay person_id.
     Usado en reemplazos atómicos (Paso 1) y en backfill completo (Paso 2 BACKFILL_MODE)."""
     candidates = []
+
+    # Fuente principal: actividades de la persona (cubre leads + deals + org)
+    act_endpoint = f"persons/{person_id}/activities" if person_id else f"organizations/{org_id}/activities"
     act_start = 0
     page = 0
     try:
         while page < MAX_ACT_PAGES:
-            ar = api_get("activities",
-                         {"org_id": org_id, "done": 1, "limit": 100, "start": act_start})
+            ar = api_get(act_endpoint, {"done": 1, "limit": 100, "start": act_start})
             page += 1
             for a in (ar.get("data") or []):
                 t = a.get("type")
@@ -359,6 +362,7 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
             act_start = pag.get("next_start", act_start + 100)
     except Exception:
         pass
+
     if person_id:
         if person_id not in person_cache:
             try:
