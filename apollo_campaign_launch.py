@@ -184,6 +184,18 @@ def get_organization(org_id):
     return resp.get("data") or {}
 
 
+_org_open_deals_cache = {}
+
+
+def org_has_open_deals(org_id):
+    if org_id in _org_open_deals_cache:
+        return _org_open_deals_cache[org_id]
+    resp = pd_get(f"organizations/{org_id}/deals", {"status": "open", "limit": 1})
+    result = len(resp.get("data") or []) > 0
+    _org_open_deals_cache[org_id] = result
+    return result
+
+
 _pipedrive_user_email_cache = {}
 
 
@@ -286,7 +298,8 @@ def main():
 
     seen_emails = set()
     stats = {"enrolled": 0, "already_active": 0, "no_sequence": 0, "logo_type_excluded": 0,
-             "too_old": 0, "no_csv_enrichment": 0, "no_email": 0, "duplicate": 0, "errors": 0}
+             "open_deal_excluded": 0, "too_old": 0, "no_csv_enrichment": 0,
+             "no_email": 0, "duplicate": 0, "errors": 0}
     backup = []
 
     for lead in leads:
@@ -312,6 +325,10 @@ def main():
                 if str(logo_type) in LOGO_TYPE_EXCLUDED:
                     print(f"  SKIP '{title}': org Logo Type excluido ({logo_type})")
                     stats["logo_type_excluded"] += 1
+                    continue
+                if org_has_open_deals(org_id):
+                    print(f"  SKIP '{title}': org tiene deals abiertos")
+                    stats["open_deal_excluded"] += 1
                     continue
             except Exception as e:
                 print(f"  ERROR obteniendo organization {org_id} ('{title}'): {e}")
