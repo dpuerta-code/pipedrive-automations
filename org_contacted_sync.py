@@ -745,6 +745,52 @@ def main():
                         print(f"    ERROR en lead {lead_id}: {e}")
                         stats["error"] += 1
 
+        # Segunda pasada: leads pendientes cuya org ya tiene FCD vigente
+        # (pueden ser leads de orgs que ya tenían FCD antes del backfill)
+        remaining_pending = [l for l in pending if l["id"] not in {
+            lead["id"]
+            for data in (org_backfill.values() if org_backfill else [])
+            for lead in data.get("leads_pending", [])
+        }]
+        leads_to_patch = []
+        for lead in remaining_pending:
+            org_id = lead.get("organization_id")
+            if not org_id:
+                continue
+            org_fcd = (org_cache.get(org_id, {}).get(ORG_FIRST_CONTACT_KEY) or "")[:10]
+            if not org_fcd:
+                continue
+            prosp_str = (lead.get(PROSPECTION_DATE_KEY) or "")[:10]
+            if not prosp_str:
+                continue
+            if abs((to_date(org_fcd) - to_date(prosp_str)).days) <= WINDOW_DAYS:
+                leads_to_patch.append((lead, org_fcd))
+
+        if leads_to_patch:
+            print(f"\nSegunda pasada: {len(leads_to_patch)} leads pendientes con FCD de su org ya seteado...")
+            for lead, contact_date in leads_to_patch:
+                lead_id = lead["id"]
+                lead_title = lead.get("title", "?")
+                is_archived = lead_id in archived_pending_ids
+                try:
+                    fresh = api_get(f"leads/{lead_id}")
+                    if fresh.get("data", {}).get(CONTACT_DATE_KEY):
+                        continue
+                    if is_archived:
+                        api_patch(f"leads/{lead_id}", {"is_archived": False})
+                    resp = api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: contact_date})
+                    if is_archived:
+                        api_patch(f"leads/{lead_id}", {"is_archived": True})
+                    if resp.get("success"):
+                        archived_tag = " (archivado)" if is_archived else ""
+                        print(f"  Lead '{lead_title}'{archived_tag}: FCD = {contact_date} (de org)")
+                        stats["updated"] += 1
+                    else:
+                        stats["error"] += 1
+                except Exception as e:
+                    print(f"  ERROR en lead {lead_id}: {e}")
+                    stats["error"] += 1
+
         org_activity_dates = {}  # Paso 3 no aplica en backfill
 
     else:
