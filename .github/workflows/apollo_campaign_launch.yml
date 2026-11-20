@@ -2,13 +2,21 @@ name: Apollo Campaign Launch
 
 on:
   schedule:
-    - cron: "0 10 * * 2-4"  # Martes/Miercoles/Jueves 5am Colombia (UTC-5 -> 10:00 UTC)
+    - cron: "12 10 * * 1-5"  # Lunes-Viernes 5am Colombia (UTC-5 -> 10:12 UTC). Minuto
+      # corrido de :00 -> :12 porque GitHub retrasa/pierde crons justo en la hora exacta
+      # (hora de mas congestion en todos los runners de GitHub Actions, documentado por
+      # GitHub); el resto de los ~20 workflows de este repo tambien usan minuto :00 y
+      # varios mostraron retrasos de varias horas en su historial de corridas.
   workflow_dispatch:
     inputs:
       test_mode:
         description: "TEST_MODE: true = solo lectura, false = ejecuta cambios"
         required: false
         default: "true"
+      lead_created_since:
+        description: "LEAD_CREATED_SINCE: solo procesa leads creados desde esta fecha (YYYY-MM-DD). Vacío = usar default del script (2026-09-18)"
+        required: false
+        default: ""
 
 jobs:
   run:
@@ -28,6 +36,7 @@ jobs:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
+          LEAD_CREATED_SINCE: ${{ inputs.lead_created_since }}
         run: python apollo_campaign_launch.py
 
       - name: Subir backup como artefacto

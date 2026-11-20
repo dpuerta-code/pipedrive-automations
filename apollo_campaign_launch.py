@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
 """
-Enrola en una secuencia de Apollo los Leads de Pipedrive con Lead Type = Prospection.
+Enrola en una secuencia de Apollo todos los Leads de Pipedrive con
+Organization Category = Coverage o New.
 
-La secuencia destino depende de "Organization Category" + "Source channel" del lead:
-  - Source channel = Org Scoring:
-      Organization Category = New      -> Motor BDR - SL·NEW
-      Organization Category = Coverage -> Motor BDR - SL·REACT
-      (Comeback / Marketing -> sin secuencia, se saltan)
-  - Cualquier otro Source channel:
-      Organization Category = Coverage -> Coverage {País} (MX/CL/Colombia, o LATAM si el país
-                                            no tiene secuencia propia)
-      (Comeback / New / Marketing -> sin secuencia, se saltan)
+La secuencia destino depende del campo "Slang Senal" del lead en Pipedrive:
+  - Slang Senal presente -> BDR Campaign (Signal)
+  - Slang Senal ausente  -> BDR Campaign (Automática)
 
-Ademas, se salta cualquier lead cuya organizacion tenga el campo "Logo Type" = Ironman,
-Champion o Target MX Champion (ids 313/314/1418), sin importar la categoria/canal.
+No hay diferenciación de país ni de canal.
 
-Las secuencias Motor BDR (SL·NEW y SL·REACT) usan variables de personalizacion por contacto
-({{contact.Slang Ciudad}}, {{contact.Slang Senal}}, etc, ver plantillas en Apollo) que vienen
-de la hoja "Prospección Slang" (Google Sheets). Ese contenido se busca por email en
-prospeccion_signals.csv (snapshot local, ver nota en el propio archivo); si un lead va para
-Motor BDR y no aparece ahi, se salta -- mejor no enrolar que mandar un correo con la variable
-vacia o el texto literal "{{contact.Slang X}}". Las 4 secuencias Coverage no lo necesitan,
-solo usan {{first_name}}/{{company}}/{{account.name}}, que siempre se llenan.
+La campaña Signal usa variables de personalización por contacto
+({{contact.Slang Ciudad}}, {{contact.Slang Senal}}, etc.) que vienen de la hoja
+"Prospección Slang" (Google Sheets). Ese contenido se busca por email en
+prospeccion_signals.csv (snapshot local); si un lead va a Signal y no aparece
+ahí, se salta -- mejor no enrolar que mandar un correo con la variable vacía.
+La campaña Automática solo usa {{first_name}}/{{company}}, no requiere señales.
 
-No se guardan campos nuevos en Pipedrive (contact_id/sequence_id/fecha de envío). El cruce
-Apollo<->Pipedrive es siempre por email. La idempotencia la maneja Apollo: POST /contacts con
-run_dedupe=true devuelve el contacto existente si el email ya está en Apollo, y
-add_contact_ids salta (sin error) contactos que ya están activos en esa secuencia.
+Ademas, se salta cualquier lead cuya organización tenga el campo "Logo Type" =
+Ironman, Champion o Target MX Champion (ids 313/314/1418).
+
+Se salta cualquier lead creado ANTES de LEAD_CREATED_SINCE.
+
+No se guardan campos nuevos en Pipedrive. El cruce Apollo<->Pipedrive es por
+email. La idempotencia la maneja Apollo: POST /contacts con run_dedupe=true
+devuelve el contacto existente, y add_contact_ids salta contactos ya activos.
 
 TEST_MODE=true  -> solo lectura, no llama a Apollo (default).
-Cron GitHub Actions: martes/miércoles/jueves únicamente.
+Cron GitHub Actions: lunes a viernes.
 """
 
 import csv
@@ -37,7 +34,7 @@ import json
 import os
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PIPEDRIVE_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 PIPEDRIVE_BASE = "https://slang.pipedrive.com/api/v1"
@@ -46,44 +43,45 @@ APOLLO_BASE = "https://api.apollo.io/api/v1"
 
 TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 
-# Filtro Pipedrive "Apollo - Lead Type Prospection" - creado 2026-10-19
-PROSPECTION_FILTER_ID = 72429
+# Filtro Pipedrive "Org Category Coverage/New (Apollo automation)" - creado 2026-09-22.
+# Reemplaza al filtro anterior "Campaing Yes" (id 71499, ya no se usa como gate de entrada).
+ORG_CATEGORY_FILTER_ID = 71609
 
-LEAD_TYPE_KEY = "c6285390d6bfe3ba42b929b5cbd61224ee60b54e"
-ORG_CAT_KEY = "fafdb80a27427f23c8f72675767e616461f056cb"
-CHANNEL_KEY = "channel"  # campo nativo "Source channel"
+# Solo se enrolan leads creados en/despues de esta fecha (YYYY-MM-DD, se compara contra
+# add_time del lead). Default: dia habil anterior (el cron corre lunes-viernes a las 5am
+# Colombia; el lunes toma el viernes, etc.). Piso: 2026-11-19 — no se tocan leads anteriores.
+# Se puede sobreescribir via env var LEAD_CREATED_SINCE para backfills manuales.
+LEAD_CREATED_FLOOR = "2026-11-19"
+
+def _prev_business_day():
+    d = datetime.now(timezone.utc).date() - timedelta(days=1)
+    while d.weekday() >= 5:  # 5=sabado, 6=domingo
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+LEAD_CREATED_SINCE = os.environ.get("LEAD_CREATED_SINCE") or max(_prev_business_day(), LEAD_CREATED_FLOOR)
+
+# Lead field "Slang Senal" — si está presente, va a Signal.
+LEAD_SLANG_SENAL_KEY = "5c1c0fa20e8a80b4847ad89958ec2aacedcb5399"
+
+# Leads cuyo canal (campo nativo "channel") sea Org Scoring también van a Signal.
+ORG_SCORING_CHANNEL = 1431
 
 # Org field "Logo Type" (ver memoria project_pipedrive_logo_type_champion_ironman).
-# OJO: Pipedrive devuelve el valor de este campo como STRING ("313"), no como int -- comparar
-# siempre como string (mismo bug ya documentado en esa memoria para el campo Country).
+# OJO: Pipedrive devuelve el valor de este campo como STRING ("313"), no como int.
 ORG_LOGO_TYPE_KEY = "b5a5290a565880a732f018c364e182719520bdd2"
 LOGO_TYPE_EXCLUDED = {"313", "314", "1418"}  # Ironman, Champion, Target MX Champion
 
-ORG_SCORING_CHANNEL = 1431
-COMEBACK = 1215
-COVERAGE = 1216
-NEW = 1217
-MARKETING = 1218
+SEQ_SIGNAL    = "6af76120a1d695000c2cc894"  # BDR Campaign (Signal)
+SEQ_AUTOMATICA = "6af764474fc963000c6e4408"  # BDR Campaign (Automática)
 
-SEQ_NEW = "6a53f346a203ac0013560c86"  # Motor BDR - SL·NEW
-SEQ_REACT = "6a53f362a203ac000ce374f3"  # Motor BDR - SL·REACT
-SEQ_COVERAGE_MX = "69cd6e73276e4f00111247a4"
-SEQ_COVERAGE_CL = "69d518168f9bb3002149790d"
-SEQ_COVERAGE_COLOMBIA = "69d3ae9434d0330021a63fbc"
-SEQ_COVERAGE_LATAM = "69d6ae5d10d96f0011bc571b"
+# Mailbox de envío por defecto — siempre @slangprogram.com.
+# Se intenta primero el mailbox del owner (local-part@slangprogram.com); si no existe,
+# cae aquí: a.rozo@slangprogram.com (id obtenido via /email_accounts).
+SEND_FROM_EMAIL_ACCOUNT_ID = "69d56166f2c8e200192f4384"  # a.rozo@slangprogram.com
 
-COUNTRY_SEQ = {
-    "Mexico": SEQ_COVERAGE_MX,
-    "Chile": SEQ_COVERAGE_CL,
-    "Colombia": SEQ_COVERAGE_COLOMBIA,
-}
-
-# Mailbox de envío por defecto (a.rozo@slangapp.com, default:true en /email_accounts)
-SEND_FROM_EMAIL_ACCOUNT_ID = "674e10be0c6c6d02cf03f630"
-
-# Secuencias que requieren las variables de personalizacion "Slang X" (ver mas abajo).
-# Las 4 Coverage NO las usan (solo {{first_name}}/{{company}}/{{account.name}}), no necesitan lookup.
-SEQUENCES_REQUIRING_SIGNALS = {SEQ_NEW, SEQ_REACT}
+# Signal requiere variables de personalización del CSV; Automática no.
+SEQUENCES_REQUIRING_SIGNALS = {SEQ_SIGNAL}
 
 # Campos custom de contacto en Apollo usados como merge tags {{contact.Slang X}} en las
 # plantillas de Motor BDR. IDs obtenidos via apollo_fields_index (modality=contact).
@@ -154,46 +152,18 @@ def apollo_get(endpoint, params=None):
     return r.json()
 
 
-def country_from_title(title):
-    """Heurística por sufijo de nombre (más confiable que el campo Country, ver memoria
-    project_pipedrive_logo_type_champion_ironman: casos donde Country venía mal para la org)."""
-    t = (title or "").lower()
-    if t.strip().endswith(" mx") or " mx " in f" {t} ":
-        return "Mexico"
-    mapping = {"mexico": "Mexico", "méxico": "Mexico", "colombia": "Colombia", "chile": "Chile"}
-    for k, v in mapping.items():
-        if k in t:
-            return v
-    return None
+def resolve_sequence(lead):
+    """Signal si tiene Slang Senal o viene de Org Scoring; Automática si no."""
+    if lead.get(LEAD_SLANG_SENAL_KEY) or lead.get("channel") == ORG_SCORING_CHANNEL:
+        return SEQ_SIGNAL, None
+    return SEQ_AUTOMATICA, None
 
 
-def resolve_sequence(org_category, channel, title):
-    """Devuelve (sequence_id, skip_reason). Si skip_reason no es None, no se enrola."""
-    if org_category == COMEBACK:
-        return None, "comeback_sin_secuencia"
-    if org_category == MARKETING:
-        return None, "marketing_sin_mapeo"
-
-    is_org_scoring = channel == ORG_SCORING_CHANNEL
-
-    if is_org_scoring:
-        if org_category == NEW:
-            return SEQ_NEW, None
-        if org_category == COVERAGE:
-            return SEQ_REACT, None
-        return None, "combinacion_sin_mapeo"
-
-    if org_category in (COVERAGE, NEW):
-        country = country_from_title(title)
-        return COUNTRY_SEQ.get(country, SEQ_COVERAGE_LATAM), None
-    return None, "combinacion_sin_mapeo"
-
-
-def get_prospection_leads():
+def get_eligible_leads():
     leads = []
     start = 0
     while True:
-        resp = pd_get("leads", {"filter_id": PROSPECTION_FILTER_ID, "limit": 500, "start": start})
+        resp = pd_get("leads", {"filter_id": ORG_CATEGORY_FILTER_ID, "limit": 500, "start": start})
         data = resp.get("data") or []
         leads.extend(data)
         pagination = resp.get("additional_data", {}).get("pagination", {})
@@ -212,6 +182,18 @@ def get_person(person_id):
 def get_organization(org_id):
     resp = pd_get(f"organizations/{org_id}")
     return resp.get("data") or {}
+
+
+_org_open_deals_cache = {}
+
+
+def org_has_open_deals(org_id):
+    if org_id in _org_open_deals_cache:
+        return _org_open_deals_cache[org_id]
+    resp = pd_get(f"organizations/{org_id}/deals", {"status": "open", "limit": 1})
+    result = len(resp.get("data") or []) > 0
+    _org_open_deals_cache[org_id] = result
+    return result
 
 
 _pipedrive_user_email_cache = {}
@@ -238,20 +220,16 @@ def get_apollo_mailboxes():
 
 def resolve_sender_account_id(owner_id, apollo_mailboxes):
     """
-    Manda desde el mailbox Apollo del owner del lead en Pipedrive. Los owners usan
-    @slangapp.com en Pipedrive; en Apollo los mailboxes de envio suelen estar en
-    @slangprogram.com con el mismo local-part (mismo patron para todos menos a.rozo,
-    que ademas tiene un mailbox exacto en @slangapp.com). Si no hay match de ningun tipo,
-    cae al mailbox default.
+    Siempre envía desde @slangprogram.com. Toma el local-part del email del owner en
+    Pipedrive y busca <local-part>@slangprogram.com en Apollo. Si no hay match, cae al
+    default (a.rozo@slangprogram.com).
     """
     owner_email = get_pipedrive_user_email(owner_id) if owner_id else None
     if owner_email:
-        if owner_email in apollo_mailboxes:
-            return apollo_mailboxes[owner_email], owner_email
         local_part = owner_email.split("@", 1)[0]
-        alt_email = f"{local_part}@slangprogram.com"
-        if alt_email in apollo_mailboxes:
-            return apollo_mailboxes[alt_email], alt_email
+        slangprogram_email = f"{local_part}@slangprogram.com"
+        if slangprogram_email in apollo_mailboxes:
+            return apollo_mailboxes[slangprogram_email], slangprogram_email
     return SEND_FROM_EMAIL_ACCOUNT_ID, None
 
 
@@ -305,8 +283,8 @@ def main():
         print("MODO TEST: no se llamara a Apollo (solo lectura)")
     print(f"{'='*60}\n")
 
-    leads = get_prospection_leads()
-    print(f"Leads con Campaing=Yes: {len(leads)}\n")
+    leads = get_eligible_leads()
+    print(f"Leads con Organization Category Coverage/New: {len(leads)}\n")
 
     signals = load_prospeccion_signals()
     print(f"Señales de personalización cargadas (prospeccion_signals.csv): {len(signals)}\n")
@@ -320,7 +298,8 @@ def main():
 
     seen_emails = set()
     stats = {"enrolled": 0, "already_active": 0, "no_sequence": 0, "logo_type_excluded": 0,
-             "no_signals": 0, "no_email": 0, "duplicate": 0, "errors": 0}
+             "open_deal_excluded": 0, "too_old": 0, "no_csv_enrichment": 0,
+             "no_email": 0, "duplicate": 0, "errors": 0}
     backup = []
 
     for lead in leads:
@@ -328,10 +307,13 @@ def main():
         person_id = extract_id(lead.get("person_id"))
         org_id = extract_id(lead.get("organization_id"))
         owner_id = extract_id(lead.get("owner_id"))
-        org_category = lead.get(ORG_CAT_KEY)
-        channel = lead.get(CHANNEL_KEY)
+        add_time = lead.get("add_time") or ""
 
-        sequence_id, skip_reason = resolve_sequence(org_category, channel, title)
+        if add_time[:10] < LEAD_CREATED_SINCE:
+            stats["too_old"] += 1
+            continue
+
+        sequence_id, skip_reason = resolve_sequence(lead)
         if skip_reason:
             stats["no_sequence"] += 1
             continue
@@ -343,6 +325,10 @@ def main():
                 if str(logo_type) in LOGO_TYPE_EXCLUDED:
                     print(f"  SKIP '{title}': org Logo Type excluido ({logo_type})")
                     stats["logo_type_excluded"] += 1
+                    continue
+                if org_has_open_deals(org_id):
+                    print(f"  SKIP '{title}': org tiene deals abiertos")
+                    stats["open_deal_excluded"] += 1
                     continue
             except Exception as e:
                 print(f"  ERROR obteniendo organization {org_id} ('{title}'): {e}")
@@ -375,13 +361,17 @@ def main():
 
         typed_custom_fields = None
         if sequence_id in SEQUENCES_REQUIRING_SIGNALS:
+            # slang_senal viene directo de Pipedrive; siempre disponible si llegamos aquí
+            senal_value = lead.get(LEAD_SLANG_SENAL_KEY, "")
+            typed_custom_fields = {SLANG_FIELD_IDS["slang_senal"]: senal_value}
+            # Enriquecer con los demás campos del CSV si están disponibles (no bloquea)
             row = signals.get(email)
-            if not row or not row.get("slang_senal"):
-                print(f"  SKIP '{title}' ({email}): sin señales de personalización en la hoja "
-                      f"(requeridas para Motor BDR, se saltaria el correo roto)")
-                stats["no_signals"] += 1
-                continue
-            typed_custom_fields = {SLANG_FIELD_IDS[k]: row[k] for k in SLANG_FIELD_IDS if row.get(k)}
+            if row:
+                for k in SLANG_FIELD_IDS:
+                    if k != "slang_senal" and row.get(k):
+                        typed_custom_fields[SLANG_FIELD_IDS[k]] = row[k]
+            else:
+                stats["no_csv_enrichment"] += 1
 
         org_name = title  # el titulo del lead ya suele llevar el nombre de la org
         full_name = person.get("name", "")
