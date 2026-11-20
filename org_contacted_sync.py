@@ -335,20 +335,13 @@ def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
     return min(qualifying) if qualifying else None
 
 
-def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
-    """Busca la actividad de contacto más temprana dentro de ±WINDOW_DAYS del prosp_date.
-    Usa /persons/{id}/activities (incluye actividades ligadas a leads, deals y org).
-    Fallback a /organizations/{id}/activities cuando no hay person_id.
-    Usado en reemplazos atómicos (Paso 1) y en backfill completo (Paso 2 BACKFILL_MODE)."""
-    candidates = []
-
-    # Fuente principal: actividades de la persona (cubre leads + deals + org)
-    act_endpoint = f"persons/{person_id}/activities" if person_id else f"organizations/{org_id}/activities"
+def _collect_activity_dates(endpoint, params, candidates):
+    """Pagina sobre un endpoint de actividades y agrega fechas calificantes a candidates."""
     act_start = 0
     page = 0
     try:
         while page < MAX_ACT_PAGES:
-            ar = api_get(act_endpoint, {"done": 1, "limit": 100, "start": act_start})
+            ar = api_get(endpoint, {**params, "done": 1, "limit": 100, "start": act_start})
             page += 1
             for a in (ar.get("data") or []):
                 t = a.get("type")
@@ -362,6 +355,24 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache):
             act_start = pag.get("next_start", act_start + 100)
     except Exception:
         pass
+
+
+def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache, lead_id=None):
+    """Busca la actividad de contacto más temprana dentro de ±WINDOW_DAYS del prosp_date.
+    Consulta tres fuentes: actividades del lead (via lead_id), actividades de la persona,
+    y actividades de la org via endpoint legado.
+    Usado en reemplazos atómicos (Paso 1) y en backfill completo (Paso 2 BACKFILL_MODE)."""
+    candidates = []
+
+    # Fuente 1: actividades del lead (nuevo endpoint, cubre Aircall creados via lead)
+    if lead_id:
+        _collect_activity_dates("activities", {"lead_id": lead_id}, candidates)
+
+    # Fuente 2: actividades de la persona (cubre deal-linked y org-linked)
+    if person_id:
+        _collect_activity_dates(f"persons/{person_id}/activities", {}, candidates)
+    else:
+        _collect_activity_dates(f"organizations/{org_id}/activities", {}, candidates)
 
     if person_id:
         if person_id not in person_cache:
@@ -464,7 +475,7 @@ def clear_stale_org_contact_dates(recent_leads, org_cache, person_cache):
 
         # Intento de reemplazo atómico: buscar nueva fecha antes de borrar
         new_date = fetch_org_qualifying_contact(
-            org_id, to_date(prosp), lead.get("person_id"), person_cache
+            org_id, to_date(prosp), lead.get("person_id"), person_cache, lead_id=lead.get("id")
         )
         try:
             if new_date:
@@ -618,7 +629,8 @@ def main():
         # Leads archivados: siempre buscar en historial completo (el contacto puede ser antiguo)
         if BACKFILL_MODE or lead_id in archived_pending_ids:
             contact_date = fetch_org_qualifying_contact(
-                org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache
+                org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache,
+                lead_id=lead.get("id")
             )
         else:
             contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
