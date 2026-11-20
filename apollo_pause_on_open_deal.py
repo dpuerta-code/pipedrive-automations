@@ -135,7 +135,7 @@ def main():
     print(f"{'='*60}\n")
 
     stats = {"paused": 0, "no_org": 0, "no_open_deal": 0, "errors": 0}
-    paused_log = []
+    scan_log = []  # registro completo de todos los contactos revisados
 
     for seq_id in SEQUENCES:
         seq_name = "Signal" if seq_id == SEQ_SIGNAL else "Automática"
@@ -152,41 +152,63 @@ def main():
         for c in contacts:
             email = c["email"]
             contact_id = c["contact_id"]
+            entry = {"email": email, "sequence": seq_name, "contact_id": contact_id,
+                     "org_id": None, "open_deals": False, "action": None}
 
             org_id = find_pipedrive_org_by_email(email)
             if not org_id:
                 stats["no_org"] += 1
+                entry["action"] = "no_org"
+                scan_log.append(entry)
                 continue
+
+            entry["org_id"] = org_id
 
             try:
                 has_deals = org_has_open_deals(org_id)
             except Exception as e:
                 print(f"  ERROR revisando deals de org {org_id} ({email}): {e}")
                 stats["errors"] += 1
+                entry["action"] = "error"
+                scan_log.append(entry)
                 continue
+
+            entry["open_deals"] = has_deals
 
             if not has_deals:
                 stats["no_open_deal"] += 1
+                entry["action"] = "ok"
+                scan_log.append(entry)
                 continue
 
             if TEST_MODE:
                 print(f"  [TEST] Pausaría {email} en {seq_name} (org {org_id} tiene deals abiertos)")
                 stats["paused"] += 1
-                paused_log.append({"email": email, "sequence": seq_name, "org_id": org_id})
+                entry["action"] = "would_pause"
+                scan_log.append(entry)
                 continue
 
             try:
                 pause_contact_in_sequence(contact_id, seq_id)
                 print(f"  PAUSADO {email} en {seq_name} (org {org_id} tiene deals abiertos)")
                 stats["paused"] += 1
-                paused_log.append({"email": email, "sequence": seq_name, "org_id": org_id, "contact_id": contact_id})
+                entry["action"] = "paused"
+                scan_log.append(entry)
             except Exception as e:
                 print(f"  ERROR pausando {email}: {e}")
                 stats["errors"] += 1
+                entry["action"] = "error"
+                scan_log.append(entry)
 
-    if paused_log:
+    if scan_log:
+        log_data = {
+            "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "test_mode": TEST_MODE,
+            "stats": stats,
+            "contacts": scan_log,
+        }
         with open("apollo_pause_on_open_deal_log.json", "w") as f:
-            json.dump(paused_log, f, indent=2, ensure_ascii=False)
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'='*60}")
     print(f"Resumen: {json.dumps(stats, ensure_ascii=False)}")
