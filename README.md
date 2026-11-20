@@ -42,6 +42,12 @@ Automatizaciones de Pipedrive que corren en **GitHub Actions** — sin servidor,
 | `og_mirror_sync.py` | Sincroniza el campo **Organization Category** desde la org hacia la persona y el lead vinculados (filtro ID 607). | Lun–Vie 7pm Colombia |
 | `pipedrive_weekly.py` | Busca deals **perdidos en los últimos 7 días** con SQL date lleno. Para cada org afectada, crea o actualiza la nota pinneada con un resumen de todos sus deals. | Viernes 9am Colombia |
 
+### CX / Retención
+
+| Script | Qué hace | Schedule |
+|--------|----------|----------|
+| `cx_alarm_apollo_sync.py` | Toma las filas nuevas del Sheet "Campanas CX - Executive Alarm System" (enviadas con el botón de la pregunta 6954 en Metabase) y las inscribe en la secuencia de Apollo "CX - Alarma Ejecutiva (Ausencias)" (hoy pausada a propósito — activarla es decisión manual). Marca cada fila como `Procesado` para no reprocesar. | Diario 10am Colombia |
+
 ---
 
 ## Scripts inactivos / one-off
@@ -65,6 +71,8 @@ Configurados en **Settings → Secrets → Actions** del repositorio. Ningún to
 | `CLICKHOUSE_PORT` | `email_history_sync.py` |
 | `CLICKHOUSE_USER` | `email_history_sync.py` |
 | `CLICKHOUSE_PASSWORD` | `email_history_sync.py`, `org_fcd_sweep.py` |
+| `APOLLO_API_KEY` | `apollo_campaign_launch.py`, `apollo_campaign_guard.py`, `cx_alarm_apollo_sync.py`, entre otros |
+| `COMPOSIO_API_KEY` | `contact_auto_lead.py`, `lead_queue_processor.py`, `cx_alarm_apollo_sync.py`, entre otros |
 
 ---
 
