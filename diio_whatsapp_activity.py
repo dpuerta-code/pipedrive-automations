@@ -2,9 +2,18 @@
 """
 diio_whatsapp_activity.py
 
-Detecta notas de Pipedrive creadas por Diio que contengan el texto
-"detalle de la conversación escrita de Whatsapp" y crea una actividad
-de tipo whatsapp marcada como hecha, asignada al rep del deal/lead.
+Detecta notas de Pipedrive creadas por Diio que sean conversaciones de
+WhatsApp y crea una actividad de tipo whatsapp marcada como hecha,
+asignada al rep del deal/lead.
+
+Diio cambio su plantilla de notas en algun momento antes de 2026: el
+trigger viejo ("detalle de la conversación escrita de Whatsapp") dejo de
+aparecer en NINGUNA nota (0 de 9,467 notas Diio revisadas en 2026). La
+plantilla nueva marca las conversaciones de WhatsApp con el texto
+"Mensajería instantánea" en vez de eso. Como consecuencia, el script
+estuvo sin detectar ninguna conversacion de WhatsApp real durante meses
+(2,892 conversaciones perdidas solo en jun-oct 2026, backfill corrido
+aparte para esas).
 
 TEST_MODE=true  → solo lectura, no ejecuta cambios.
 Cron: 12pm y 7pm Colombia (17:00 y 00:00 UTC).
@@ -28,7 +37,7 @@ TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 # Buscar notas de las últimas N horas (cubre la ventana entre las 2 corridas diarias)
 LOOKBACK_HOURS = 14
 
-DIIO_TRIGGER = "detalle de la conversación escrita de Whatsapp"
+DIIO_TRIGGER = "Mensajería instantánea"
 ACTIVITY_SUBJECT = "Whatsapp Message Diio"
 ACTIVITY_TYPE = "whatsapp"
 
@@ -69,9 +78,9 @@ def api_post(endpoint, data):
     return r.json()
 
 
-def api_patch(endpoint, data):
+def api_put(endpoint, data):
     rate_limit()
-    r = requests.patch(
+    r = requests.put(
         f"{BASE_URL}/{endpoint}",
         params={"api_token": API_TOKEN},
         json=data,
@@ -258,7 +267,7 @@ def main():
                 replaced += 1
             else:
                 try:
-                    resp = api_patch(f"activities/{existing_id}", {"subject": ACTIVITY_SUBJECT})
+                    resp = api_put(f"activities/{existing_id}", {"subject": ACTIVITY_SUBJECT})
                     if resp.get("success"):
                         print(f"  Actividad {existing_id} renombrada: '{existing_subject}' → '{ACTIVITY_SUBJECT}'")
                         replaced += 1

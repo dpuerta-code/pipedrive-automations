@@ -2,7 +2,7 @@ name: Lead Touch Numbering Backfill
 
 on:
   schedule:
-    - cron: "0 0 * * *"    # Todos los dias 7pm Colombia (UTC-5 -> 00:00 UTC)
+    - cron: "7 0 * * *"    # Todos los dias ~7pm Colombia (UTC-5 -> 00:07 UTC). Minuto distinto de :00 para evitar la hora de mayor congestion de GitHub Actions.
   workflow_dispatch:
     inputs:
       test_mode:

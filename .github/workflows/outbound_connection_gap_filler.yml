@@ -2,7 +2,7 @@ name: Outbound Connection Gap Filler
 
 on:
   schedule:
-    - cron: "0 12 * * 1-5"   # Lunes-viernes 7am Colombia (UTC-5 -> 12:00 UTC)
+    - cron: "13 9 * * 1-5"   # Lunes-viernes ~4am Colombia (UTC-5 -> 09:13 UTC). Antes era 7am en punto (12:00 UTC), pero GitHub Actions lo retrasaba 4-6 horas (hora de mayor congestion); se adelanta y se usa un minuto fuera de punta para que llegue antes de que empiecen a hacerse llamadas ese dia.
   workflow_dispatch:
     inputs:
       test_mode:
