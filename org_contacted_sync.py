@@ -676,6 +676,7 @@ def main():
             target_orgs = target_orgs[:MAX_LEADS_TEST_MODE]
             print(f"TEST MODE: procesando solo las primeras {len(target_orgs)} orgs.\n")
 
+        org_backfill = {}  # se llena a continuación; definido aquí para que la segunda pasada lo vea siempre
         if not target_orgs:
             print("Nada que procesar en backfill.")
         else:
@@ -747,11 +748,12 @@ def main():
 
         # Segunda pasada: leads pendientes cuya org ya tiene FCD vigente
         # (pueden ser leads de orgs que ya tenían FCD antes del backfill)
-        remaining_pending = [l for l in pending if l["id"] not in {
+        already_patched_ids = {
             lead["id"]
-            for data in (org_backfill.values() if org_backfill else [])
+            for data in org_backfill.values()
             for lead in data.get("leads_pending", [])
-        }]
+        }
+        remaining_pending = [l for l in pending if l["id"] not in already_patched_ids]
         leads_to_patch = []
         for lead in remaining_pending:
             org_id = lead.get("organization_id")
