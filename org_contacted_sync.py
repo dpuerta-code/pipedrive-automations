@@ -315,6 +315,35 @@ def fetch_recent_activity_dates_by_org(person_cache):
     return by_org
 
 
+def get_orgs_needing_contact_date():
+    """Orgs con Last Prospection Date en los últimos ARCHIVED_LOOKBACK_DAYS días
+    y sin First Contact Date vigente para esa sesión."""
+    cutoff = (date.today() - timedelta(days=ARCHIVED_LOOKBACK_DAYS)).isoformat()
+    orgs = []
+    start = 0
+    while True:
+        resp = api_get("organizations", {"limit": 500, "start": start})
+        data = resp.get("data") or []
+        if not data:
+            break
+        for org in data:
+            last_prosp = (org.get(ORG_LAST_PROSPECTION_KEY) or "")[:10]
+            if not last_prosp or last_prosp < cutoff:
+                continue
+            first_contact = (org.get(ORG_FIRST_CONTACT_KEY) or "")[:10]
+            if first_contact:
+                gap = abs((to_date(last_prosp) - to_date(first_contact)).days)
+                if gap < WINDOW_DAYS:
+                    continue  # FCD vigente para esta sesión, ya está bien
+            orgs.append(org)
+        pagination = resp.get("additional_data", {}).get("pagination", {})
+        if pagination.get("more_items_in_collection"):
+            start = pagination["next_start"]
+        else:
+            break
+    return orgs
+
+
 def fetch_activities_window_by_org(start_date, end_date, person_cache):
     """org_id -> lista de fechas (str YYYY-MM-DD) de actividades en la ventana dada.
     Usa user_id=0 para incluir actividades de todos los usuarios del equipo."""
@@ -637,52 +666,26 @@ def main():
     stats = {"updated": 0, "no_match": 0, "error": 0, "propagated_to_org": 0}
 
     if BACKFILL_MODE:
-        # Lógica org-first: agrupa los leads pendientes por org, busca actividades
-        # en un solo barrido y actualiza org + leads en conjunto.
-        print(f"BACKFILL_MODE: lógica org-first (últimos {ARCHIVED_LOOKBACK_DAYS} días)...")
+        # Lógica org-first: arranca de las organizaciones con Last Prospection Date reciente
+        print(f"BACKFILL_MODE: buscando orgs con Last Prospection Date (últimos {ARCHIVED_LOOKBACK_DAYS} días)...")
+        target_orgs = get_orgs_needing_contact_date()
+        print(f"Orgs con prospección reciente sin FCD vigente: {len(target_orgs)}")
 
-        # 1. Agrupar leads pendientes por org; quedarse con la Prospection Date más reciente
-        backfill_since = (date.today() - timedelta(days=ARCHIVED_LOOKBACK_DAYS)).isoformat()
-        org_backfill = {}  # org_id -> {"prosp_date": str, "leads_pending": [lead, ...]}
-        for l in pending:
-            prosp_str = (l.get(PROSPECTION_DATE_KEY) or "")[:10]
-            if not prosp_str or prosp_str < backfill_since:
-                continue
-            org_id = l.get("organization_id")
-            if not org_id:
-                continue
-            if org_id not in org_backfill or prosp_str > org_backfill[org_id]["prosp_date"]:
-                org_backfill.setdefault(org_id, {"prosp_date": prosp_str, "leads_pending": []})
-                org_backfill[org_id]["prosp_date"] = prosp_str
-            org_backfill[org_id]["leads_pending"].append(l)
+        if TEST_MODE and target_orgs:
+            target_orgs = target_orgs[:MAX_LEADS_TEST_MODE]
+            print(f"TEST MODE: procesando solo las primeras {len(target_orgs)} orgs.\n")
 
-        # 2. Cargar org cache y filtrar las que ya tienen FCD de esta sesión
-        for org_id in list(org_backfill.keys()):
-            if org_id not in org_cache:
-                try:
-                    resp = api_get(f"organizations/{org_id}")
-                    org_cache[org_id] = resp.get("data") or {}
-                except Exception:
-                    del org_backfill[org_id]
-                    continue
-            org_fcd = (org_cache[org_id].get(ORG_FIRST_CONTACT_KEY) or "")[:10]
-            if org_fcd:
-                prosp_str = org_backfill[org_id]["prosp_date"]
-                gap = abs((to_date(prosp_str) - to_date(org_fcd)).days)
-                if gap < WINDOW_DAYS and not org_backfill[org_id]["leads_pending"]:
-                    del org_backfill[org_id]
-
-        print(f"Orgs a revisar en backfill: {len(org_backfill)}")
-
-        if TEST_MODE and org_backfill:
-            keys = list(org_backfill.keys())[:MAX_LEADS_TEST_MODE]
-            org_backfill = {k: org_backfill[k] for k in keys}
-            print(f"TEST MODE: procesando solo las primeras {len(org_backfill)} orgs.\n")
-
-        if not org_backfill:
+        if not target_orgs:
             print("Nada que procesar en backfill.")
         else:
-            # 3. Un solo barrido de actividades para todo el período relevante
+            # Construir mapa org_id -> leads sin FCD (activos + archivados recientes)
+            leads_by_org = {}
+            for l in pending:
+                oid = l.get("organization_id")
+                if oid:
+                    leads_by_org.setdefault(oid, []).append(l)
+
+            # Un solo barrido de actividades para el período completo
             total_days = ARCHIVED_LOOKBACK_DAYS + WINDOW_DAYS
             act_start_str = (date.today() - timedelta(days=total_days)).isoformat()
             act_end_str = date.today().isoformat()
@@ -690,29 +693,34 @@ def main():
             backfill_dates = fetch_activities_window_by_org(act_start_str, act_end_str, person_cache)
             print(f"Orgs con actividad en la ventana: {len(backfill_dates)}\n")
 
-            for j, (org_id, data) in enumerate(org_backfill.items(), 1):
-                prosp_date = to_date(data["prosp_date"])
-                org_name = (org_cache.get(org_id) or {}).get("name", str(org_id))
+            for j, org in enumerate(target_orgs, 1):
+                org_id = org["id"]
+                org_name = org.get("name", str(org_id))
+                last_prosp_str = (org.get(ORG_LAST_PROSPECTION_KEY) or "")[:10]
+                prosp_date = to_date(last_prosp_str)
+                org_cache[org_id] = org  # llenar cache con lo que ya tenemos
 
-                # 4. Fecha qualifying para esta org dentro del window
+                # Buscar fecha qualifying para esta org
                 all_dates = backfill_dates.get(org_id, [])
                 qualifying = [d for d in all_dates if abs((to_date(d) - prosp_date).days) <= WINDOW_DAYS]
                 if not qualifying:
-                    pending_count = len(data["leads_pending"])
-                    print(f"[{j}/{len(org_backfill)}] '{org_name}' ({org_id}): sin actividad qualifying ({pending_count} leads pendientes)")
-                    stats["no_match"] += pending_count
+                    print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): sin actividad qualifying")
+                    stats["no_match"] += 1
                     continue
 
                 contact_date = min(qualifying)
-                print(f"[{j}/{len(org_backfill)}] '{org_name}' ({org_id}): contact_date = {contact_date}")
+                print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): contact_date = {contact_date}")
 
-                # 5. Actualizar FCD de la org
+                # Actualizar FCD de la org
                 if propagate_to_org(org_id, contact_date, org_cache):
                     stats["propagated_to_org"] += 1
                     print(f"    -> FCD org: {contact_date}")
 
-                # 6. Parchear leads pendientes de esta org (unarchive → patch → re-archive)
-                for lead in data["leads_pending"]:
+                # Parchear leads sin FCD de esta org (activos + archivados del ciclo)
+                org_leads = leads_by_org.get(org_id, [])
+                if not org_leads:
+                    continue
+                for lead in org_leads:
                     lead_id = lead["id"]
                     lead_title = lead.get("title", "?")
                     is_archived = lead_id in archived_pending_ids
