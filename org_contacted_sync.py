@@ -315,6 +315,33 @@ def fetch_recent_activity_dates_by_org(person_cache):
     return by_org
 
 
+def fetch_activities_window_by_org(start_date, end_date, person_cache):
+    """org_id -> lista de fechas (str YYYY-MM-DD) de actividades en la ventana dada.
+    Usa user_id=0 para incluir actividades de todos los usuarios del equipo."""
+    by_org = {}
+    for t in CONTACT_ACTIVITY_TYPES:
+        offset = 0
+        while True:
+            resp = api_get("activities", {
+                "type": t, "user_id": 0, "done": 1, "limit": 500, "start": offset,
+                "start_date": start_date, "end_date": end_date,
+            })
+            data = resp.get("data") or []
+            for a in data:
+                org_id = get_org_id_from_activity(a, person_cache)
+                if not org_id:
+                    continue
+                d = a.get("marked_as_done_time") or a.get("due_date") or a.get("add_time")
+                if d:
+                    by_org.setdefault(org_id, []).append(d[:10])
+            pagination = resp.get("additional_data", {}).get("pagination", {})
+            if pagination.get("more_items_in_collection"):
+                offset = pagination["next_start"]
+            else:
+                break
+    return by_org
+
+
 def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
     prosp = to_date(lead[PROSPECTION_DATE_KEY])
     candidates = list(org_activity_dates.get(lead["organization_id"], []))
@@ -364,9 +391,9 @@ def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache, le
     Usado en reemplazos atómicos (Paso 1) y en backfill completo (Paso 2 BACKFILL_MODE)."""
     candidates = []
 
-    # Fuente 1: actividades del lead (nuevo endpoint, cubre Aircall creados via lead)
+    # Fuente 1: actividades del lead con user_id=0 (todos los usuarios, cubre Aircall via lead)
     if lead_id:
-        _collect_activity_dates("activities", {"lead_id": lead_id}, candidates)
+        _collect_activity_dates("activities", {"lead_id": lead_id, "user_id": 0}, candidates)
 
     # Fuente 2: actividades de la persona (cubre deal-linked y org-linked)
     if person_id:
@@ -603,66 +630,164 @@ def main():
 
     # Paso 2: llenar Org First Contact Date en leads pendientes
     archived_pending = [l for l in get_recently_archived_leads() if not l.get(CONTACT_DATE_KEY)]
+    archived_pending_ids = {l["id"] for l in archived_pending}
     pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)] + archived_pending
     print(f"Leads pendientes de Org First Contact Date: {len(pending) - len(archived_pending)} activos + {len(archived_pending)} archivados recientes")
-    if TEST_MODE and pending:
-        pending = pending[:MAX_LEADS_TEST_MODE]
-        print(f"TEST MODE: procesando solo los primeros {len(pending)}.\n")
-
-    if BACKFILL_MODE:
-        print(f"BACKFILL_MODE: buscando en historial completo de cada org pendiente...")
-        org_activity_dates = {}  # no se usa en backfill; cada lead consulta su org directamente
-    else:
-        print(f"Buscando actividad de contacto de los ultimos {LOOKBACK_DAYS} dias...")
-        org_activity_dates = fetch_recent_activity_dates_by_org(person_cache)
-        print(f"Organizaciones con actividad reciente: {len(org_activity_dates)}")
-    print()
 
     stats = {"updated": 0, "no_match": 0, "error": 0, "propagated_to_org": 0}
 
-    archived_pending_ids = {l["id"] for l in archived_pending}
+    if BACKFILL_MODE:
+        # Lógica org-first: agrupa los leads pendientes por org, busca actividades
+        # en un solo barrido y actualiza org + leads en conjunto.
+        print(f"BACKFILL_MODE: lógica org-first (últimos {ARCHIVED_LOOKBACK_DAYS} días)...")
 
-    for i, lead in enumerate(pending or [], 1):
-        lead_id = lead["id"]
-        title = lead.get("title", "?")
-        org_id = lead["organization_id"]
-        # Leads archivados: siempre buscar en historial completo (el contacto puede ser antiguo)
-        if BACKFILL_MODE or lead_id in archived_pending_ids:
-            contact_date = fetch_org_qualifying_contact(
-                org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache,
-                lead_id=lead.get("id")
-            )
-        else:
-            contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
-
-        if not contact_date:
-            stats["no_match"] += 1
-            continue
-
-        # re-chequeo justo antes de escribir, por seguridad write-once
-        try:
-            fresh = api_get(f"leads/{lead_id}")
-            if fresh.get("data", {}).get(CONTACT_DATE_KEY):
-                print(f"[{i}/{len(pending)}] '{title}': ya se lleno en paralelo, se omite.")
+        # 1. Agrupar leads pendientes por org; quedarse con la Prospection Date más reciente
+        backfill_since = (date.today() - timedelta(days=ARCHIVED_LOOKBACK_DAYS)).isoformat()
+        org_backfill = {}  # org_id -> {"prosp_date": str, "leads_pending": [lead, ...]}
+        for l in pending:
+            prosp_str = (l.get(PROSPECTION_DATE_KEY) or "")[:10]
+            if not prosp_str or prosp_str < backfill_since:
                 continue
-            is_archived_lead = lead_id in archived_pending_ids
-            if is_archived_lead:
-                api_patch(f"leads/{lead_id}", {"is_archived": False})
-            resp = api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: contact_date})
-            if is_archived_lead:
-                api_patch(f"leads/{lead_id}", {"is_archived": True})
-            if resp.get("success"):
-                archived_tag = " (archivado)" if is_archived_lead else ""
-                print(f"[{i}/{len(pending)}] '{title}'{archived_tag}: Org First Contact Date = {contact_date}")
-                stats["updated"] += 1
+            org_id = l.get("organization_id")
+            if not org_id:
+                continue
+            if org_id not in org_backfill or prosp_str > org_backfill[org_id]["prosp_date"]:
+                org_backfill.setdefault(org_id, {"prosp_date": prosp_str, "leads_pending": []})
+                org_backfill[org_id]["prosp_date"] = prosp_str
+            org_backfill[org_id]["leads_pending"].append(l)
+
+        # 2. Cargar org cache y filtrar las que ya tienen FCD de esta sesión
+        for org_id in list(org_backfill.keys()):
+            if org_id not in org_cache:
+                try:
+                    resp = api_get(f"organizations/{org_id}")
+                    org_cache[org_id] = resp.get("data") or {}
+                except Exception:
+                    del org_backfill[org_id]
+                    continue
+            org_fcd = (org_cache[org_id].get(ORG_FIRST_CONTACT_KEY) or "")[:10]
+            if org_fcd:
+                prosp_str = org_backfill[org_id]["prosp_date"]
+                gap = abs((to_date(prosp_str) - to_date(org_fcd)).days)
+                if gap < WINDOW_DAYS and not org_backfill[org_id]["leads_pending"]:
+                    del org_backfill[org_id]
+
+        print(f"Orgs a revisar en backfill: {len(org_backfill)}")
+
+        if TEST_MODE and org_backfill:
+            keys = list(org_backfill.keys())[:MAX_LEADS_TEST_MODE]
+            org_backfill = {k: org_backfill[k] for k in keys}
+            print(f"TEST MODE: procesando solo las primeras {len(org_backfill)} orgs.\n")
+
+        if not org_backfill:
+            print("Nada que procesar en backfill.")
+        else:
+            # 3. Un solo barrido de actividades para todo el período relevante
+            total_days = ARCHIVED_LOOKBACK_DAYS + WINDOW_DAYS
+            act_start_str = (date.today() - timedelta(days=total_days)).isoformat()
+            act_end_str = date.today().isoformat()
+            print(f"Buscando actividades ({act_start_str} → {act_end_str}, {total_days} días)...")
+            backfill_dates = fetch_activities_window_by_org(act_start_str, act_end_str, person_cache)
+            print(f"Orgs con actividad en la ventana: {len(backfill_dates)}\n")
+
+            for j, (org_id, data) in enumerate(org_backfill.items(), 1):
+                prosp_date = to_date(data["prosp_date"])
+                org_name = (org_cache.get(org_id) or {}).get("name", str(org_id))
+
+                # 4. Fecha qualifying para esta org dentro del window
+                all_dates = backfill_dates.get(org_id, [])
+                qualifying = [d for d in all_dates if abs((to_date(d) - prosp_date).days) <= WINDOW_DAYS]
+                if not qualifying:
+                    pending_count = len(data["leads_pending"])
+                    print(f"[{j}/{len(org_backfill)}] '{org_name}' ({org_id}): sin actividad qualifying ({pending_count} leads pendientes)")
+                    stats["no_match"] += pending_count
+                    continue
+
+                contact_date = min(qualifying)
+                print(f"[{j}/{len(org_backfill)}] '{org_name}' ({org_id}): contact_date = {contact_date}")
+
+                # 5. Actualizar FCD de la org
                 if propagate_to_org(org_id, contact_date, org_cache):
                     stats["propagated_to_org"] += 1
-                    print(f"    -> tambien se lleno en la organizacion {org_id}")
+                    print(f"    -> FCD org: {contact_date}")
+
+                # 6. Parchear leads pendientes de esta org (unarchive → patch → re-archive)
+                for lead in data["leads_pending"]:
+                    lead_id = lead["id"]
+                    lead_title = lead.get("title", "?")
+                    is_archived = lead_id in archived_pending_ids
+                    try:
+                        fresh = api_get(f"leads/{lead_id}")
+                        if fresh.get("data", {}).get(CONTACT_DATE_KEY):
+                            print(f"    Lead '{lead_title}': ya tiene FCD, omitido")
+                            continue
+                        if is_archived:
+                            api_patch(f"leads/{lead_id}", {"is_archived": False})
+                        resp = api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: contact_date})
+                        if is_archived:
+                            api_patch(f"leads/{lead_id}", {"is_archived": True})
+                        if resp.get("success"):
+                            archived_tag = " (archivado)" if is_archived else ""
+                            print(f"    Lead '{lead_title}'{archived_tag}: FCD = {contact_date}")
+                            stats["updated"] += 1
+                        else:
+                            stats["error"] += 1
+                    except Exception as e:
+                        print(f"    ERROR en lead {lead_id}: {e}")
+                        stats["error"] += 1
+
+        org_activity_dates = {}  # Paso 3 no aplica en backfill
+
+    else:
+        # Daily sync: actividades de los últimos LOOKBACK_DAYS días
+        if TEST_MODE and pending:
+            pending = pending[:MAX_LEADS_TEST_MODE]
+            print(f"TEST MODE: procesando solo los primeros {len(pending)}.\n")
+
+        print(f"Buscando actividad de contacto de los ultimos {LOOKBACK_DAYS} dias...")
+        org_activity_dates = fetch_recent_activity_dates_by_org(person_cache)
+        print(f"Organizaciones con actividad reciente: {len(org_activity_dates)}")
+        print()
+
+        for i, lead in enumerate(pending or [], 1):
+            lead_id = lead["id"]
+            title = lead.get("title", "?")
+            org_id = lead["organization_id"]
+            if lead_id in archived_pending_ids:
+                contact_date = fetch_org_qualifying_contact(
+                    org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache,
+                    lead_id=lead.get("id")
+                )
             else:
+                contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
+
+            if not contact_date:
+                stats["no_match"] += 1
+                continue
+
+            try:
+                fresh = api_get(f"leads/{lead_id}")
+                if fresh.get("data", {}).get(CONTACT_DATE_KEY):
+                    print(f"[{i}/{len(pending)}] '{title}': ya se lleno en paralelo, se omite.")
+                    continue
+                is_archived_lead = lead_id in archived_pending_ids
+                if is_archived_lead:
+                    api_patch(f"leads/{lead_id}", {"is_archived": False})
+                resp = api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: contact_date})
+                if is_archived_lead:
+                    api_patch(f"leads/{lead_id}", {"is_archived": True})
+                if resp.get("success"):
+                    archived_tag = " (archivado)" if is_archived_lead else ""
+                    print(f"[{i}/{len(pending)}] '{title}'{archived_tag}: Org First Contact Date = {contact_date}")
+                    stats["updated"] += 1
+                    if propagate_to_org(org_id, contact_date, org_cache):
+                        stats["propagated_to_org"] += 1
+                        print(f"    -> tambien se lleno en la organizacion {org_id}")
+                else:
+                    stats["error"] += 1
+            except Exception as e:
+                print(f"[{i}/{len(pending)}] ERROR en lead {lead_id}: {e}")
                 stats["error"] += 1
-        except Exception as e:
-            print(f"[{i}/{len(pending)}] ERROR en lead {lead_id}: {e}")
-            stats["error"] += 1
 
     # Paso 3: orgs con deal activo reciente pero sin lead activo y sin First Contact Date
     # Solo se considera el deal más reciente por org, y solo si fue creado hace <= DEAL_LOOKBACK_DAYS días.
