@@ -33,6 +33,7 @@ Automatizaciones de Pipedrive que corren en **GitHub Actions** — sin servidor,
 |--------|----------|----------|
 | `email_history_sync.py` | Reemplaza el conector nativo de Airbyte (`pipedrive.mail`, muerto desde julio 2024). Recalcula ~1700 orgs activas, llama a `/organizations/{id}/flow`, filtra `mailMessage` de los últimos 4 días e inserta en **`bpa.email_history`** (ClickHouse) en batches de 200. Deduplica por `mail_id`. | Diario 6am Colombia |
 | `linkedin_size_check.py` | Para orgs con LinkedIn URL, consulta company size vía **Apify** y marca *"Menos de 50 empleados"* en ICP Non Compliance Reason si aplica. | Lun–Vie 7pm Colombia |
+| `org_fcd_sweep.py` | Mantiene **`bpa.org_fcd_corrections`** (ClickHouse) al día — corrección manual para un bug de Airbyte/dbt donde un campo vaciado en Pipedrive nunca sincroniza el `null`. Parte 1: revalida correcciones existentes y borra las que ya quedaron obsoletas (Pipedrive volvió a tener valor real). Parte 2: busca orgs con lead activo donde ClickHouse cree que First Contact Date tiene valor pero nunca se verificó en vivo, e inserta corrección si está vacío. Usado por la card "Orgs sin contacto" del BDR Performance Dashboard. | Diario 6:13am Colombia |
 
 ### Mantenimiento
 
@@ -63,7 +64,7 @@ Configurados en **Settings → Secrets → Actions** del repositorio. Ningún to
 | `CLICKHOUSE_HOST` | `email_history_sync.py` |
 | `CLICKHOUSE_PORT` | `email_history_sync.py` |
 | `CLICKHOUSE_USER` | `email_history_sync.py` |
-| `CLICKHOUSE_PASSWORD` | `email_history_sync.py` |
+| `CLICKHOUSE_PASSWORD` | `email_history_sync.py`, `org_fcd_sweep.py` |
 
 ---
 

@@ -2,13 +2,18 @@ name: Org FCD Owner Sync
 
 on:
   schedule:
-    - cron: "0 13 * * 3"   # Miércoles 8:00am Colombia (UTC-5 → 13:00 UTC)
-    - cron: "0 0 * * 6"    # Viernes 7:00pm Colombia (UTC-5 → 00:00 UTC sábado)
+    - cron: "0 10 * * *"   # Todos los días 5:00am Colombia (UTC-5 → 10:00 UTC)
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE: true = solo lectura, false = ejecuta cambios"
+        required: false
+        default: "true"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -21,9 +26,5 @@ jobs:
       - name: Ejecutar Org FCD Owner Sync
         env:
           PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
-          CLICKHOUSE_HOST:     ${{ secrets.CLICKHOUSE_HOST }}
-          CLICKHOUSE_PORT:     ${{ secrets.CLICKHOUSE_PORT }}
-          CLICKHOUSE_USER:     ${{ secrets.CLICKHOUSE_USER }}
-          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
-          TEST_MODE: "false"
+          TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'false' }}
         run: python org_fcd_owner_sync.py

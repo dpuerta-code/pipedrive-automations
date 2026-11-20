@@ -5,13 +5,14 @@ ya no deberian seguir recibiendo correos.
 
 Reglas (por email, cruzando Apollo <-> Pipedrive; no se guardan campos nuevos en Pipedrive):
 
-1. Si ya NO existe ningun Lead con Campaing=Yes para esa persona en Pipedrive (se archivo,
-   se elimino o se convirtio - no se distingue cual, ver nota abajo):
+1. Si el lead tiene Lead Type = Marketing -> se detiene inmediatamente.
+2. Si ya NO existe ningun Lead con Lead Type = Prospection para esa persona en Pipedrive
+   (se archivo, se elimino o se convirtio - no se distingue cual, ver nota abajo):
      - Si la organizacion tiene al menos un deal OPEN -> se detienen TODAS las secuencias
        activas de TODA la organizacion (probable conversion a deal).
      - Si no -> se detiene solo esa persona.
-2. Si el lead sigue existiendo normalmente, se revisa aparte: si la organizacion tiene un
-   deal con SAL date entre el primer envio (contact_campaign_statuses.added_at) y hoy ->
+3. Si el lead sigue con Lead Type = Prospection, se revisa aparte: si la organizacion tiene
+   un deal con SAL date entre el primer envio (contact_campaign_statuses.added_at) y hoy ->
    se detienen TODAS las secuencias activas de esa organizacion.
 
 Nota tecnica (2026-09-09): el parametro archived_status de GET /leads no filtra nada en esta
@@ -53,7 +54,9 @@ TEST_MODE = os.environ.get("TEST_MODE", "true").lower() == "true"
 # 2026-08-25, ninguno ligado a un lead Campaing=Yes.
 GUARD_SINCE_DATE = os.environ.get("GUARD_SINCE_DATE", "2026-09-09")
 
-CAMPAING_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
+LEAD_TYPE_KEY         = "c6285390d6bfe3ba42b929b5cbd61224ee60b54e"
+LEAD_TYPE_PROSPECTION = 294
+LEAD_TYPE_MARKETING   = 295
 SAL_DATE_KEY = "8a4d1715b308943f49d7e5b270a7ea81d6f356b2"
 
 TARGET_SEQUENCES = {
@@ -172,9 +175,14 @@ def get_active_apollo_contacts():
     return active
 
 
-def find_campaing_lead_for_email(email):
-    """Busca una persona por email y, si existe, su(s) lead(s) con Campaing=Yes.
-    Devuelve (org_id, org_name) si encuentra un lead Campaing=Yes vigente, o None si no."""
+def find_lead_status_for_email(email):
+    """
+    Busca leads de Pipedrive para esta persona por Lead Type.
+    Retorna:
+      - ("prospection", org_id, org_name) si hay un lead con Lead Type = Prospection
+      - ("marketing", org_id, org_name) si hay un lead con Lead Type = Marketing (sin Prospection)
+      - None si no hay leads relevantes o la persona no existe
+    """
     resp = pd_get("persons/search", {"term": email, "fields": "email", "exact_match": "true"})
     items = (resp.get("data") or {}).get("items") or []
     if not items:
@@ -187,9 +195,15 @@ def find_campaing_lead_for_email(email):
 
     resp = pd_get("leads", {"person_id": person_id, "limit": 200})
     leads = resp.get("data") or []
+    has_marketing = False
     for lead in leads:
-        if lead.get(CAMPAING_KEY) == 1453:
-            return org_id, org_name
+        lt = lead.get(LEAD_TYPE_KEY)
+        if lt == LEAD_TYPE_PROSPECTION:
+            return "prospection", org_id, org_name
+        if lt == LEAD_TYPE_MARKETING:
+            has_marketing = True
+    if has_marketing:
+        return "marketing", org_id, org_name
     return None
 
 
@@ -262,10 +276,16 @@ def main():
 
     for email, seqs in active.items():
         try:
-            found = find_campaing_lead_for_email(email)
+            found = find_lead_status_for_email(email)
         except Exception as e:
             print(f"  ERROR buscando lead para {email}: {e}")
             stats["errors"] += 1
+            continue
+
+        if found is not None and found[0] == "marketing":
+            # Lead Type = Marketing → pausa inmediata
+            _, org_id, org_name = found
+            stop_contact(email, seqs.keys(), "lead_type_marketing", backup, stats)
             continue
 
         if found is None:
@@ -287,7 +307,8 @@ def main():
             stop_contact(email, seqs.keys(), "lead_not_found_no_open_deal", backup, stats)
             continue
 
-        org_id, org_name = found
+        # found[0] == "prospection" → sigue con check de SAL date
+        _, org_id, org_name = found
         min_added = min((v for v in seqs.values() if v), default=None)
         pending_sal_check.append((email, org_id, org_name, set(seqs.keys()), min_added))
 
