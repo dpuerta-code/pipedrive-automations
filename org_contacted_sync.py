@@ -629,9 +629,15 @@ def main():
             if fresh.get("data", {}).get(CONTACT_DATE_KEY):
                 print(f"[{i}/{len(pending)}] '{title}': ya se lleno en paralelo, se omite.")
                 continue
+            is_archived_lead = lead_id in archived_pending_ids
+            if is_archived_lead:
+                api_patch(f"leads/{lead_id}", {"is_archived": False})
             resp = api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: contact_date})
+            if is_archived_lead:
+                api_patch(f"leads/{lead_id}", {"is_archived": True})
             if resp.get("success"):
-                print(f"[{i}/{len(pending)}] '{title}': Org First Contact Date = {contact_date}")
+                archived_tag = " (archivado)" if is_archived_lead else ""
+                print(f"[{i}/{len(pending)}] '{title}'{archived_tag}: Org First Contact Date = {contact_date}")
                 stats["updated"] += 1
                 if propagate_to_org(org_id, contact_date, org_cache):
                     stats["propagated_to_org"] += 1
