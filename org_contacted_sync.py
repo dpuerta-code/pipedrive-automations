@@ -52,9 +52,10 @@ ORG_COUNT_FIRST_CONTACT_KEY = "e117d76508f5bdc87d55c35f3c30dacd10c6f7d9"  # Coun
 ORG_COUNT_ZERO_OPTION = 1412  # "0"
 ORG_COUNT_ONE_OPTION = 1413   # "1"
 
-WINDOW_DAYS = 60       # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
+WINDOW_DAYS = 60        # +/- dias alrededor del Prospection Date que cuentan como "contacto valido"
 LOOKBACK_DAYS = 3       # cuantos dias hacia atras de actividad/prospeccion se revisan en cada corrida
 DEAL_LOOKBACK_DAYS = 2  # deals creados hace mas de N dias se ignoran en el Paso 3
+ARCHIVED_LOOKBACK_DAYS = 14  # leads archivados en los ultimos N dias tambien se procesan en Paso 2
 MAX_ACT_PAGES = 15      # tope de paginas al buscar actividades historicas de una org
 
 # BACKFILL_MODE: cuando es true, Paso 2 busca en todo el historial de la org
@@ -220,6 +221,28 @@ def get_active_leads():
         else:
             break
     return [l for l in leads if l.get(PROSPECTION_DATE_KEY) and l.get("organization_id")]
+
+
+def get_recently_archived_leads():
+    """Leads archivados en los últimos ARCHIVED_LOOKBACK_DAYS días con Prospection Date y sin Org First Contact Date."""
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=ARCHIVED_LOOKBACK_DAYS)).isoformat()
+    leads = []
+    start = 0
+    while True:
+        resp = api_get("leads", {"archived_status": "archived", "limit": 500, "start": start})
+        data = resp.get("data") or []
+        leads.extend(data)
+        pagination = resp.get("additional_data", {}).get("pagination", {})
+        if pagination.get("more_items_in_collection"):
+            start = pagination["next_start"]
+        else:
+            break
+    return [
+        l for l in leads
+        if l.get(PROSPECTION_DATE_KEY)
+        and l.get("organization_id")
+        and (l.get("update_time") or "")[:10] >= cutoff
+    ]
 
 
 def get_active_deals():
@@ -564,8 +587,9 @@ def main():
     print(f"Orgs actualizadas por nueva sesión en lead existente: {new_sessions_propagated}\n")
 
     # Paso 2: llenar Org First Contact Date en leads pendientes
-    pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)]
-    print(f"Leads activos pendientes de Org First Contact Date: {len(pending)}")
+    archived_pending = [l for l in get_recently_archived_leads() if not l.get(CONTACT_DATE_KEY)]
+    pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)] + archived_pending
+    print(f"Leads pendientes de Org First Contact Date: {len(pending) - len(archived_pending)} activos + {len(archived_pending)} archivados recientes")
     if TEST_MODE and pending:
         pending = pending[:MAX_LEADS_TEST_MODE]
         print(f"TEST MODE: procesando solo los primeros {len(pending)}.\n")
@@ -581,11 +605,14 @@ def main():
 
     stats = {"updated": 0, "no_match": 0, "error": 0, "propagated_to_org": 0}
 
+    archived_pending_ids = {l["id"] for l in archived_pending}
+
     for i, lead in enumerate(pending or [], 1):
         lead_id = lead["id"]
         title = lead.get("title", "?")
         org_id = lead["organization_id"]
-        if BACKFILL_MODE:
+        # Leads archivados: siempre buscar en historial completo (el contacto puede ser antiguo)
+        if BACKFILL_MODE or lead_id in archived_pending_ids:
             contact_date = fetch_org_qualifying_contact(
                 org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache
             )
