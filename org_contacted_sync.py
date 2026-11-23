@@ -905,6 +905,23 @@ def main():
                     qualifying = [d for d, uid in all_entries
                                   if abs((to_date(d) - prosp_date).days) <= WINDOW_DAYS]
 
+                # También revisar last_outgoing_mail_time de las personas de los leads de esta org
+                person_ids_seen = set()
+                for lead in leads_by_org.get(org_id, []):
+                    pid = lead.get("person_id")
+                    if not pid or pid in person_ids_seen:
+                        continue
+                    person_ids_seen.add(pid)
+                    if pid not in person_cache:
+                        try:
+                            pr = api_get(f"persons/{pid}")
+                            person_cache[pid] = pr.get("data") or {}
+                        except Exception:
+                            person_cache[pid] = {}
+                    mail_time = (person_cache[pid].get("last_outgoing_mail_time") or "")[:10]
+                    if mail_time and abs((to_date(mail_time) - prosp_date).days) <= WINDOW_DAYS:
+                        qualifying.append(mail_time)
+
                 if not qualifying:
                     print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): sin actividad qualifying"
                           + (f" (owner {lead_owner})" if lead_owner else ""))
