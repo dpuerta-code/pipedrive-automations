@@ -853,6 +853,9 @@ def main():
 
                 # Owner actual de esta org (para filtrar actividades)
                 lead_owner = org_to_owner.get(org_id)
+                # Fallback: si no hay leads conocidos, usar el owner directo de la org
+                if lead_owner is None:
+                    lead_owner = extract_id(org.get("owner_id"))
 
                 # Si el FCD de la org es de ANTES de la Last Prosp Date → ciclo viejo, limpiar
                 # para que propagate_to_org lo pueda rellenar con las actividades del owner actual
@@ -921,6 +924,27 @@ def main():
                     mail_time = (person_cache[pid].get("last_outgoing_mail_time") or "")[:10]
                     if mail_time and abs((to_date(mail_time) - prosp_date).days) <= WINDOW_DAYS:
                         qualifying.append(mail_time)
+
+                # Fallback de email: si no hay leads en leads_by_org, buscar personas de la org
+                if not leads_by_org.get(org_id) and not person_ids_seen:
+                    try:
+                        org_persons = api_get(f"organizations/{org_id}/persons", {"limit": 10})
+                        for p in (org_persons.get("data") or []):
+                            pid = p.get("id")
+                            if not pid or pid in person_ids_seen:
+                                continue
+                            person_ids_seen.add(pid)
+                            if pid not in person_cache:
+                                try:
+                                    pr = api_get(f"persons/{pid}")
+                                    person_cache[pid] = pr.get("data") or {}
+                                except Exception:
+                                    person_cache[pid] = {}
+                            mail_time = (person_cache[pid].get("last_outgoing_mail_time") or "")[:10]
+                            if mail_time and abs((to_date(mail_time) - prosp_date).days) <= WINDOW_DAYS:
+                                qualifying.append(mail_time)
+                    except Exception:
+                        pass
 
                 if not qualifying:
                     print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): sin actividad qualifying"
