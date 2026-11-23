@@ -7,7 +7,7 @@ on:
     - cron: "30 18 * * 1-5"  # Lunes-viernes 1:30pm Colombia (UTC-5 -> 18:30 UTC)
     - cron: "0 20 * * 1-5"   # Lunes-viernes 3:00pm Colombia (UTC-5 -> 20:00 UTC)
     - cron: "0 23 * * 1-5"   # Lunes-viernes 6:00pm Colombia (UTC-5 -> 23:00 UTC)
-    - cron: "0 13 * * 1"     # Lunes 8:00am Colombia (UTC-5 -> 13:00 UTC) — backfill semanal
+    - cron: "0 1 * * 2-6"    # Lunes-viernes 8:00pm Colombia (UTC-5 -> 01:00 UTC +1d) — backfill diario
   workflow_dispatch:
     inputs:
       backfill_mode:
@@ -38,6 +38,6 @@ jobs:
           BACKFILL_MODE: >-
             ${{
               (github.event_name == 'workflow_dispatch' && inputs.backfill_mode == 'true') ||
-              (github.event_name == 'schedule' && github.event.schedule == '0 13 * * 1')
+              (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6')
             }}
         run: python org_contacted_sync.py
