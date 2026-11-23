@@ -341,7 +341,9 @@ def fetch_recent_activity_dates_by_org(person_cache):
 
 def get_orgs_needing_contact_date():
     """Orgs con Last Prospection Date en los últimos ARCHIVED_LOOKBACK_DAYS días
-    y sin First Contact Date vigente para esa sesión."""
+    donde no existe un FCD seteado DESPUÉS de la Last Prospection Date.
+    Si el FCD es anterior a la Last Prosp Date (posiblemente de un ciclo o BDR anterior),
+    se incluye para re-evaluar."""
     cutoff = (date.today() - timedelta(days=ARCHIVED_LOOKBACK_DAYS)).isoformat()
     orgs = []
     start = 0
@@ -355,10 +357,9 @@ def get_orgs_needing_contact_date():
             if not last_prosp or last_prosp < cutoff:
                 continue
             first_contact = (org.get(ORG_FIRST_CONTACT_KEY) or "")[:10]
-            if first_contact:
-                gap = abs((to_date(last_prosp) - to_date(first_contact)).days)
-                if gap < WINDOW_DAYS:
-                    continue  # FCD vigente para esta sesión, ya está bien
+            if first_contact and first_contact >= last_prosp:
+                continue  # FCD seteado después (o en) la última prospección → válido por ahora
+            # Sin FCD, o FCD anterior a la Last Prosp Date → incluir para backfill
             orgs.append(org)
         pagination = resp.get("additional_data", {}).get("pagination", {})
         if pagination.get("more_items_in_collection"):
@@ -744,6 +745,13 @@ def main():
                 if owner:
                     org_to_owner[oid] = owner
 
+        # Leads activos CON FCD (para limpiar si su FCD es de antes de la Last Prosp Date)
+        active_with_fcd_by_org = {}
+        for l in active_leads:
+            oid = l.get("organization_id")
+            if oid and l.get(CONTACT_DATE_KEY):
+                active_with_fcd_by_org.setdefault(oid, []).append(l)
+
         stale_fcd_orgs = set()
         leads_to_check = [(l, False) for l in active_leads if l.get(CONTACT_DATE_KEY)]
         leads_to_check += [(l, True) for l in recently_archived_all if l.get(CONTACT_DATE_KEY)]
@@ -845,6 +853,48 @@ def main():
 
                 # Owner actual de esta org (para filtrar actividades)
                 lead_owner = org_to_owner.get(org_id)
+
+                # Si el FCD de la org es de ANTES de la Last Prosp Date → ciclo viejo, limpiar
+                # para que propagate_to_org lo pueda rellenar con las actividades del owner actual
+                existing_org_fcd = (org_cache[org_id].get(ORG_FIRST_CONTACT_KEY) or "")[:10]
+                if existing_org_fcd and existing_org_fcd < last_prosp_str:
+                    if not TEST_MODE:
+                        try:
+                            api_put(f"organizations/{org_id}", {
+                                ORG_FIRST_CONTACT_KEY: None,
+                                ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ZERO_OPTION,
+                            })
+                            org_cache[org_id][ORG_FIRST_CONTACT_KEY] = None
+                            print(f"[{j}/{len(target_orgs)}] '{org_name}': FCD antiguo ({existing_org_fcd}) limpiado (< Last Prosp {last_prosp_str})")
+                        except Exception as e:
+                            print(f"  ERROR limpiando FCD de org {org_id}: {e}")
+                    else:
+                        org_cache[org_id][ORG_FIRST_CONTACT_KEY] = None
+                        print(f"[{j}/{len(target_orgs)}] '{org_name}': [TEST] limpiaría FCD antiguo ({existing_org_fcd}) (< Last Prosp {last_prosp_str})")
+                    # También limpiar leads activos con FCD anterior a la Last Prosp Date
+                    for lead in active_with_fcd_by_org.get(org_id, []):
+                        lead_fcd = (lead.get(CONTACT_DATE_KEY) or "")[:10]
+                        if not lead_fcd or lead_fcd >= last_prosp_str:
+                            continue
+                        lead_id_cl = lead["id"]
+                        lead_title_cl = lead.get("title", "?")
+                        if not TEST_MODE:
+                            try:
+                                resp_cl = api_patch(f"leads/{lead_id_cl}", {CONTACT_DATE_KEY: None})
+                                if resp_cl.get("success"):
+                                    print(f"    Lead activo '{lead_title_cl}': FCD antiguo ({lead_fcd}) limpiado")
+                                    lead_copy = dict(lead)
+                                    lead_copy[CONTACT_DATE_KEY] = None
+                                    if lead_id_cl not in {l["id"] for l in leads_by_org.get(org_id, [])}:
+                                        leads_by_org.setdefault(org_id, []).append(lead_copy)
+                            except Exception as e:
+                                print(f"    ERROR limpiando FCD lead {lead_id_cl}: {e}")
+                        else:
+                            print(f"    [TEST] Lead activo '{lead_title_cl}': limpiaría FCD antiguo ({lead_fcd})")
+                            lead_copy = dict(lead)
+                            lead_copy[CONTACT_DATE_KEY] = None
+                            if lead_id_cl not in {l["id"] for l in leads_by_org.get(org_id, [])}:
+                                leads_by_org.setdefault(org_id, []).append(lead_copy)
 
                 # Buscar fecha qualifying filtrada por owner
                 all_entries = backfill_dates.get(org_id, [])
