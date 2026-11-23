@@ -245,6 +245,28 @@ def get_recently_archived_leads():
     ]
 
 
+def get_recently_archived_all():
+    """Leads archivados en los últimos ARCHIVED_LOOKBACK_DAYS días (con o sin FCD).
+    Usado en backfill para detectar cambios de owner."""
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=ARCHIVED_LOOKBACK_DAYS)).isoformat()
+    leads = []
+    start = 0
+    while True:
+        resp = api_get("leads", {"archived_status": "archived", "limit": 500, "start": start})
+        data = resp.get("data") or []
+        leads.extend(data)
+        pagination = resp.get("additional_data", {}).get("pagination", {})
+        if pagination.get("more_items_in_collection"):
+            start = pagination["next_start"]
+        else:
+            break
+    return [
+        l for l in leads
+        if l.get("organization_id")
+        and (l.get("update_time") or "")[:10] >= cutoff
+    ]
+
+
 def get_active_deals():
     """Deals abiertos con org vinculada."""
     deals = []
@@ -287,7 +309,8 @@ def get_org_id_from_activity(activity, person_cache):
 
 
 def fetch_recent_activity_dates_by_org(person_cache):
-    """org_id -> lista de fechas (str YYYY-MM-DD) de contacto reciente."""
+    """org_id -> lista de (date_str, user_id) de contacto reciente.
+    Trae user_id=0 (todos) para luego filtrar por owner de cada lead."""
     start_date = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     end_date = date.today().isoformat()
     by_org = {}
@@ -304,8 +327,9 @@ def fetch_recent_activity_dates_by_org(person_cache):
                 if not org_id:
                     continue
                 d = a.get("marked_as_done_time") or a.get("add_time")
+                uid = a.get("user_id")
                 if d:
-                    by_org.setdefault(org_id, []).append(d[:10])
+                    by_org.setdefault(org_id, []).append((d[:10], uid))
             pagination = resp.get("additional_data", {}).get("pagination", {})
             if pagination.get("more_items_in_collection"):
                 start = pagination["next_start"]
@@ -345,8 +369,8 @@ def get_orgs_needing_contact_date():
 
 
 def fetch_activities_window_by_org(start_date, end_date, person_cache):
-    """org_id -> lista de fechas (str YYYY-MM-DD) de actividades en la ventana dada.
-    Usa user_id=0 para incluir actividades de todos los usuarios del equipo."""
+    """org_id -> lista de (date_str, user_id) de actividades en la ventana dada.
+    Trae user_id=0 (todos) para luego filtrar por owner de cada lead."""
     by_org = {}
     for t in CONTACT_ACTIVITY_TYPES:
         offset = 0
@@ -361,8 +385,9 @@ def fetch_activities_window_by_org(start_date, end_date, person_cache):
                 if not org_id:
                     continue
                 d = a.get("marked_as_done_time") or a.get("due_date") or a.get("add_time")
+                uid = a.get("user_id")
                 if d:
-                    by_org.setdefault(org_id, []).append(d[:10])
+                    by_org.setdefault(org_id, []).append((d[:10], uid))
             pagination = resp.get("additional_data", {}).get("pagination", {})
             if pagination.get("more_items_in_collection"):
                 offset = pagination["next_start"]
@@ -373,7 +398,14 @@ def fetch_activities_window_by_org(start_date, end_date, person_cache):
 
 def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
     prosp = to_date(lead[PROSPECTION_DATE_KEY])
-    candidates = list(org_activity_dates.get(lead["organization_id"], []))
+    lead_owner = extract_id(lead.get("owner_id"))
+    entries = list(org_activity_dates.get(lead["organization_id"], []))
+
+    # Solo actividades del BDR actual (owner del lead)
+    if lead_owner is not None:
+        candidates = [d for d, uid in entries if uid == lead_owner]
+    else:
+        candidates = [d for d, uid in entries]
 
     person_id = lead.get("person_id")
     if person_id:
@@ -391,8 +423,9 @@ def find_qualifying_contact_date(lead, org_activity_dates, person_cache):
     return min(qualifying) if qualifying else None
 
 
-def _collect_activity_dates(endpoint, params, candidates):
-    """Pagina sobre un endpoint de actividades y agrega fechas calificantes a candidates."""
+def _collect_activity_dates(endpoint, params, candidates, owner_id=None):
+    """Pagina sobre un endpoint de actividades y agrega fechas calificantes a candidates.
+    Si owner_id está dado, solo cuenta actividades de ese usuario."""
     act_start = 0
     page = 0
     try:
@@ -401,10 +434,13 @@ def _collect_activity_dates(endpoint, params, candidates):
             page += 1
             for a in (ar.get("data") or []):
                 t = a.get("type")
-                if t in CONTACT_ACTIVITY_TYPES:
-                    d = a.get("due_date") or (a.get("marked_as_done_time") or "")[:10]
-                    if d and len(d) >= 10:
-                        candidates.append(d[:10])
+                if t not in CONTACT_ACTIVITY_TYPES:
+                    continue
+                if owner_id is not None and a.get("user_id") != owner_id:
+                    continue  # actividad de otro BDR, ignorar
+                d = a.get("due_date") or (a.get("marked_as_done_time") or "")[:10]
+                if d and len(d) >= 10:
+                    candidates.append(d[:10])
             pag = ar.get("additional_data", {}).get("pagination", {})
             if not pag.get("more_items_in_collection"):
                 break
@@ -413,22 +449,28 @@ def _collect_activity_dates(endpoint, params, candidates):
         pass
 
 
-def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache, lead_id=None):
+def fetch_org_qualifying_contact(org_id, prosp_date, person_id, person_cache, lead_id=None, owner_id=None):
     """Busca la actividad de contacto más temprana dentro de ±WINDOW_DAYS del prosp_date.
+    Si owner_id está dado, solo cuenta actividades de ese usuario (el BDR actual del lead).
     Consulta tres fuentes: actividades del lead (via lead_id), actividades de la persona,
     y actividades de la org via endpoint legado.
     Usado en reemplazos atómicos (Paso 1) y en backfill completo (Paso 2 BACKFILL_MODE)."""
     candidates = []
 
-    # Fuente 1: actividades del lead con user_id=0 (todos los usuarios, cubre Aircall via lead)
+    # Fuente 1: actividades del lead filtradas por owner
     if lead_id:
-        _collect_activity_dates("activities", {"lead_id": lead_id, "user_id": 0}, candidates)
+        _collect_activity_dates(
+            "activities",
+            {"lead_id": lead_id, "user_id": owner_id if owner_id else 0},
+            candidates,
+            owner_id,
+        )
 
-    # Fuente 2: actividades de la persona (cubre deal-linked y org-linked)
+    # Fuente 2: actividades de la persona (cubre deal-linked y org-linked), filtradas por owner
     if person_id:
-        _collect_activity_dates(f"persons/{person_id}/activities", {}, candidates)
+        _collect_activity_dates(f"persons/{person_id}/activities", {}, candidates, owner_id)
     else:
-        _collect_activity_dates(f"organizations/{org_id}/activities", {}, candidates)
+        _collect_activity_dates(f"organizations/{org_id}/activities", {}, candidates, owner_id)
 
     if person_id:
         if person_id not in person_cache:
@@ -532,7 +574,8 @@ def clear_stale_org_contact_dates(recent_leads, org_cache, person_cache):
 
         # Intento de reemplazo atómico: buscar nueva fecha antes de borrar
         new_date = fetch_org_qualifying_contact(
-            org_id, to_date(prosp), lead.get("person_id"), person_cache, lead_id=lead.get("id")
+            org_id, to_date(prosp), lead.get("person_id"), person_cache,
+            lead_id=lead.get("id"), owner_id=extract_id(lead.get("owner_id")),
         )
         try:
             if new_date:
@@ -670,7 +713,105 @@ def main():
         # Lógica org-first: arranca de las organizaciones con Last Prospection Date reciente
         print(f"BACKFILL_MODE: buscando orgs con Last Prospection Date (últimos {ARCHIVED_LOOKBACK_DAYS} días)...")
         target_orgs = get_orgs_needing_contact_date()
+        target_org_ids = {o["id"] for o in target_orgs}
         print(f"Orgs con prospección reciente sin FCD vigente: {len(target_orgs)}")
+
+        # Detectar leads con FCD de un BDR anterior (owner cambió pero era lead nuevo → no estaba en owner_cache)
+        # Si el lead activo/archivado tiene FCD pero su owner difiere del de los leads archivados recientes
+        # de la misma org, el FCD puede ser del ciclo anterior → hay que resetearlo.
+        print("Verificando FCDs de owner anterior en leads activos y archivados recientes...")
+        recently_archived_all = get_recently_archived_all()
+
+        # Mapa org_id -> owners de leads archivados recientes
+        archived_owners_by_org = {}
+        for l in recently_archived_all:
+            oid = l.get("organization_id")
+            if oid:
+                archived_owners_by_org.setdefault(oid, set()).add(extract_id(l.get("owner_id")))
+
+        # Mapa org_id -> owner actual (activo primero, luego archivados pendientes)
+        org_to_owner = {}
+        for l in active_leads:
+            oid = l.get("organization_id")
+            if oid:
+                owner = extract_id(l.get("owner_id"))
+                if owner:
+                    org_to_owner[oid] = owner
+        for l in sorted(archived_pending, key=lambda x: x.get("update_time", ""), reverse=True):
+            oid = l.get("organization_id")
+            if oid and oid not in org_to_owner:
+                owner = extract_id(l.get("owner_id"))
+                if owner:
+                    org_to_owner[oid] = owner
+
+        stale_fcd_orgs = set()
+        leads_to_check = [(l, False) for l in active_leads if l.get(CONTACT_DATE_KEY)]
+        leads_to_check += [(l, True) for l in recently_archived_all if l.get(CONTACT_DATE_KEY)]
+
+        for lead, is_arch in leads_to_check:
+            org_id = lead.get("organization_id")
+            if not org_id:
+                continue
+            active_owner = extract_id(lead.get("owner_id"))
+            archived_owners = archived_owners_by_org.get(org_id, set())
+            if not archived_owners or active_owner in archived_owners:
+                continue  # sin cambio de owner
+            # Owner actual no estaba entre los owners del ciclo archivado → FCD potencialmente stale
+            lead_id = lead["id"]
+            lead_title = lead.get("title", "?")
+            stale_fcd_orgs.add(org_id)
+            if TEST_MODE:
+                arch_tag = " (archivado)" if is_arch else ""
+                print(f"  [TEST] Lead '{lead_title}'{arch_tag}: limpiaría FCD stale (owner {archived_owners} → {active_owner})")
+            else:
+                try:
+                    if is_arch:
+                        api_patch(f"leads/{lead_id}", {"is_archived": False})
+                    api_patch(f"leads/{lead_id}", {CONTACT_DATE_KEY: None})
+                    if is_arch:
+                        api_patch(f"leads/{lead_id}", {"is_archived": True})
+                    arch_tag = " (archivado)" if is_arch else ""
+                    print(f"  FCD limpiado en lead '{lead_title}'{arch_tag} ({lead_id}): owner cambió")
+                except Exception as e:
+                    print(f"  ERROR limpiando FCD de lead {lead_id}: {e}")
+
+        # Las orgs con FCD stale deben entrar al backfill (limpiar FCD de la org y agregar a target)
+        for org_id in stale_fcd_orgs:
+            if org_id in target_org_ids:
+                continue
+            if org_id not in org_cache:
+                try:
+                    resp_org = api_get(f"organizations/{org_id}")
+                    org_cache[org_id] = resp_org.get("data") or {}
+                except Exception:
+                    continue
+            org = org_cache[org_id]
+            if not org.get(ORG_LAST_PROSPECTION_KEY):
+                continue
+            if TEST_MODE:
+                print(f"  [TEST] Limpiaría FCD de org {org_id} ('{org.get('name')}') y la incluiría en backfill")
+            else:
+                try:
+                    api_put(f"organizations/{org_id}", {
+                        ORG_FIRST_CONTACT_KEY: None,
+                        ORG_COUNT_FIRST_CONTACT_KEY: ORG_COUNT_ZERO_OPTION,
+                    })
+                    org_cache[org_id][ORG_FIRST_CONTACT_KEY] = None
+                    print(f"  FCD de org {org_id} ('{org.get('name')}') limpiado por cambio de owner")
+                except Exception as e:
+                    print(f"  ERROR limpiando FCD de org {org_id}: {e}")
+            target_orgs.append(org)
+            target_org_ids.add(org_id)
+
+        if stale_fcd_orgs:
+            print(f"Orgs con FCD stale (owner cambió): {len(stale_fcd_orgs)}")
+            # Re-fetch para reflejar los FCDs limpiados
+            if not TEST_MODE:
+                active_leads = get_active_leads()
+                archived_pending = [l for l in get_recently_archived_leads() if not l.get(CONTACT_DATE_KEY)]
+                archived_pending_ids = {l["id"] for l in archived_pending}
+                pending = [l for l in active_leads if not l.get(CONTACT_DATE_KEY)] + archived_pending
+                print(f"Leads pendientes (actualizado): {len(pending) - len(archived_pending)} activos + {len(archived_pending)} archivados\n")
 
         if TEST_MODE and target_orgs:
             target_orgs = target_orgs[:MAX_LEADS_TEST_MODE]
@@ -702,16 +843,27 @@ def main():
                 prosp_date = to_date(last_prosp_str)
                 org_cache[org_id] = org  # llenar cache con lo que ya tenemos
 
-                # Buscar fecha qualifying para esta org
-                all_dates = backfill_dates.get(org_id, [])
-                qualifying = [d for d in all_dates if abs((to_date(d) - prosp_date).days) <= WINDOW_DAYS]
+                # Owner actual de esta org (para filtrar actividades)
+                lead_owner = org_to_owner.get(org_id)
+
+                # Buscar fecha qualifying filtrada por owner
+                all_entries = backfill_dates.get(org_id, [])
+                if lead_owner is not None:
+                    qualifying = [d for d, uid in all_entries
+                                  if uid == lead_owner and abs((to_date(d) - prosp_date).days) <= WINDOW_DAYS]
+                else:
+                    qualifying = [d for d, uid in all_entries
+                                  if abs((to_date(d) - prosp_date).days) <= WINDOW_DAYS]
+
                 if not qualifying:
-                    print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): sin actividad qualifying")
+                    print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): sin actividad qualifying"
+                          + (f" (owner {lead_owner})" if lead_owner else ""))
                     stats["no_match"] += 1
                     continue
 
                 contact_date = min(qualifying)
-                print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): contact_date = {contact_date}")
+                print(f"[{j}/{len(target_orgs)}] '{org_name}' ({org_id}): contact_date = {contact_date}"
+                      + (f" (owner {lead_owner})" if lead_owner else ""))
 
                 # Actualizar FCD de la org
                 if propagate_to_org(org_id, contact_date, org_cache):
@@ -813,7 +965,7 @@ def main():
             if lead_id in archived_pending_ids:
                 contact_date = fetch_org_qualifying_contact(
                     org_id, to_date(lead[PROSPECTION_DATE_KEY]), lead.get("person_id"), person_cache,
-                    lead_id=lead.get("id")
+                    lead_id=lead.get("id"), owner_id=extract_id(lead.get("owner_id")),
                 )
             else:
                 contact_date = find_qualifying_contact_date(lead, org_activity_dates, person_cache)
