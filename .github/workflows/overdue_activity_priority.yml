@@ -2,7 +2,7 @@ name: Overdue Activity Priority
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # Todos los dias 7am Colombia (UTC-5 -> 12:00 UTC)
+    - cron: "0 10 * * *"   # Todos los dias 5:00am Colombia (UTC-5 -> 10:00 UTC)
   workflow_dispatch:
     inputs:
       test_mode:

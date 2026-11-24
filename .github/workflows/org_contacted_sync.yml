@@ -2,11 +2,11 @@ name: Org Contacted Sync
 
 on:
   schedule:
-    - cron: "0 15 * * 1-5"   # Lunes-viernes 10:00am Colombia (UTC-5 -> 15:00 UTC)
-    - cron: "30 16 * * 1-5"  # Lunes-viernes 11:30am Colombia (UTC-5 -> 16:30 UTC)
-    - cron: "30 18 * * 1-5"  # Lunes-viernes 1:30pm Colombia (UTC-5 -> 18:30 UTC)
-    - cron: "0 20 * * 1-5"   # Lunes-viernes 3:00pm Colombia (UTC-5 -> 20:00 UTC)
-    - cron: "0 23 * * 1-5"   # Lunes-viernes 6:00pm Colombia (UTC-5 -> 23:00 UTC)
+    - cron: "15 15 * * 1-5"  # Lunes-viernes 10:15am Colombia (UTC-5 -> 15:15 UTC)
+    - cron: "45 16 * * 1-5"  # Lunes-viernes 11:45am Colombia (UTC-5 -> 16:45 UTC)
+    - cron: "45 18 * * 1-5"  # Lunes-viernes 1:45pm Colombia (UTC-5 -> 18:45 UTC)
+    - cron: "15 20 * * 1-5"  # Lunes-viernes 3:15pm Colombia (UTC-5 -> 20:15 UTC)
+    - cron: "15 23 * * 1-5"  # Lunes-viernes 6:15pm Colombia (UTC-5 -> 23:15 UTC)
     - cron: "0 1 * * 2-6"    # Lunes-viernes 8:00pm Colombia (UTC-5 -> 01:00 UTC +1d) — backfill diario
   workflow_dispatch:
     inputs:
