@@ -24,7 +24,21 @@ primer N (empezando en 1) que no este completo todavia; ese es el N de la
 nueva actividad. Si los toques 1, 2 y 3 ya estan completos, no se crea
 nada (no existe un tipo "Outbound Connection 4").
 
-TEST_MODE=true -> solo calcula y muestra que crearia, no escribe nada.
+Excepcion: con CALL_ONLY_ALL=True (activo desde semana del 2026-11-02),
+TODOS los BDRs usan la regla de "toque completo con solo la llamada" --
+no hace falta tambien el whatsapp. CALL_ONLY_OWNER_IDS se deja como
+referencia por si se vuelve a restringir a BDRs puntuales.
+
+EXCLUDED_OWNER_IDS: Valentina Carrillo ya no es BDR, se excluye por
+completo (no se le crean ni revisan Outbound Connection).
+
+Ademas: si un toque N ya esta completo (aircall + whatsapp, o solo
+aircall para Angie/Lizeth) y la actividad "Outbound Connection N"
+correspondiente de ese lead todavia no esta marcada como hecha, se marca
+como hecha automaticamente -- asi no se queda abierta/vencida una tarea
+cuyo contacto ya se realizo.
+
+TEST_MODE=true -> solo calcula y muestra que crearia/marcaria, no escribe nada.
 Cron: todos los dias 7am Colombia (UTC-5 -> 12:00 UTC).
 """
 
@@ -38,7 +52,10 @@ from datetime import date
 API_TOKEN = os.environ["PIPEDRIVE_API_TOKEN"]
 BASE_URL = "https://slang.pipedrive.com/api/v1"
 
-EXCLUDED_OWNER_IDS = {25168321}  # Valentina Martin Clavijo -- automatizacion pausada para ella
+EXCLUDED_OWNER_IDS = {21997527}  # Valentina Carrillo -- ya no es BDR
+
+CALL_ONLY_OWNER_IDS = {22793685, 25308725}  # Angie Rozo, Lizeth Castro -- se deja como referencia
+CALL_ONLY_ALL = True  # 2026-10-30: desde la semana del 2026-11-02, todos los BDRs son call-only
 
 OUTBOUND_TYPE_BY_TOUCH = {1: "outbound_connection_1", 2: "outbound_connection_2", 3: "outbound_connection_3"}
 MAX_TOUCH = 3
@@ -82,6 +99,13 @@ def api_post(endpoint, data):
     return r.json()
 
 
+def api_put(endpoint, data):
+    rate_limit()
+    r = requests.put(f"{BASE_URL}/{endpoint}", params={"api_token": API_TOKEN}, json=data, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
 def get_active_leads():
     leads, start = [], 0
     while True:
@@ -118,7 +142,7 @@ def has_any_pending_activity(lead_activities):
     return any(not a.get("done") for a in lead_activities)
 
 
-def next_touch_target(lead_activities):
+def next_touch_target(lead_activities, call_only=False):
     aircall_touches, whatsapp_touches = set(), set()
     for a in lead_activities:
         subject = a.get("subject") or ""
@@ -133,10 +157,41 @@ def next_touch_target(lead_activities):
             whatsapp_touches.add(n)
 
     for n in range(1, MAX_TOUCH + 1):
-        if n in aircall_touches and n in whatsapp_touches:
+        complete = n in aircall_touches and (call_only or n in whatsapp_touches)
+        if complete:
             continue
         return n
     return None  # 1, 2 y 3 ya completos
+
+
+def find_outbound_connections_to_mark_done(lead_activities, call_only=False):
+    """Para cada toque N ya completo (aircall + whatsapp, o solo aircall
+    si call_only), busca la actividad "Outbound Connection N" de este
+    lead que siga sin marcarse como hecha y la devuelve -- su contacto ya
+    se realizo, no deberia quedar pendiente."""
+    aircall_touches, whatsapp_touches = set(), set()
+    for a in lead_activities:
+        subject = a.get("subject") or ""
+        m = TOQUE_RE.match(subject)
+        if not m:
+            continue
+        n = int(m.group(1))
+        t = a.get("type") or ""
+        if t.startswith(AIRCALL_PREFIX):
+            aircall_touches.add(n)
+        elif t == "whatsapp":
+            whatsapp_touches.add(n)
+
+    to_mark = []
+    for n in range(1, MAX_TOUCH + 1):
+        complete = n in aircall_touches and (call_only or n in whatsapp_touches)
+        if not complete:
+            continue
+        type_n = OUTBOUND_TYPE_BY_TOUCH[n]
+        for a in lead_activities:
+            if a.get("type") == type_n and not a.get("done"):
+                to_mark.append(a)
+    return to_mark
 
 
 def main():
@@ -154,7 +209,7 @@ def main():
     if TEST_MODE:
         leads = leads[:MAX_LEADS_TEST_MODE]
 
-    stats = {"created": 0, "skipped_pending_activity": 0,
+    stats = {"created": 0, "marked_done": 0, "skipped_pending_activity": 0,
               "skipped_all_touches_complete": 0, "error": 0}
     result_log = []
     activities_cache = {}
@@ -169,6 +224,34 @@ def main():
         acts = activities_cache[pid]
         lead_activities = [a for a in acts if a.get("lead_id") == lead_id]
 
+        call_only = CALL_ONLY_ALL or lead.get("owner_id") in CALL_ONLY_OWNER_IDS
+
+        # Si un toque ya esta completo (aircall + whatsapp, o solo aircall
+        # para call_only) pero su "Outbound Connection N" sigue sin marcar,
+        # se marca como hecha ahora mismo -- se hace ANTES del chequeo de
+        # pendientes de abajo, porque esa misma actividad podria ser la
+        # unica cosa pendiente de la persona.
+        for a in find_outbound_connections_to_mark_done(lead_activities, call_only=call_only):
+            if TEST_MODE:
+                print(f"[{i}/{len(leads)}] '{title}': [TEST] marcaria como hecha la actividad {a['id']} "
+                      f"('{a.get('subject')}') -- su toque ya esta completo")
+                a["done"] = True
+                stats["marked_done"] += 1
+            else:
+                try:
+                    resp = api_put(f"activities/{a['id']}", {"done": 1})
+                    if resp.get("success"):
+                        print(f"[{i}/{len(leads)}] '{title}': actividad {a['id']} ('{a.get('subject')}') "
+                              f"marcada como hecha -- toque completo")
+                        a["done"] = True
+                        stats["marked_done"] += 1
+                    else:
+                        print(f"[{i}/{len(leads)}] '{title}': ERROR marcando hecha la actividad {a['id']}: {resp}")
+                        stats["error"] += 1
+                except Exception as e:
+                    print(f"[{i}/{len(leads)}] '{title}': ERROR marcando hecha la actividad {a['id']}: {e}")
+                    stats["error"] += 1
+
         # Ojo: el chequeo de pendientes usa TODAS las actividades de la
         # persona (acts), no solo las de este lead -- si la persona tiene
         # 2+ leads activos y ya le quedo algo pendiente por otro lead, no
@@ -178,7 +261,7 @@ def main():
             stats["skipped_pending_activity"] += 1
             continue
 
-        target = next_touch_target(lead_activities)
+        target = next_touch_target(lead_activities, call_only=call_only)
         if target is None:
             print(f"[{i}/{len(leads)}] '{title}': toques 1-3 ya completos, no se crea nada.")
             stats["skipped_all_touches_complete"] += 1
@@ -223,7 +306,8 @@ def main():
         json.dump(result_log, f)
 
     print(f"\n{'='*60}")
-    print(f"Resumen: {stats['created']} creadas, {stats['skipped_pending_activity']} ya tenian actividad pendiente, "
+    print(f"Resumen: {stats['created']} creadas, {stats['marked_done']} marcadas como hechas (toque completo), "
+          f"{stats['skipped_pending_activity']} ya tenian actividad pendiente, "
           f"{stats['skipped_all_touches_complete']} con toques 1-3 completos, {stats['error']} errores")
     print(f"{'='*60}\n")
 
