@@ -107,6 +107,17 @@ Cuando un resultado de Pipedrive llega inline y hay que guardarlo vía Write, se
 ### 🟢 CAMBIO 2026-11-16 — changelog movido a este archivo; prompt condensado
 Los párrafos de changelog del prompt que documentaban cambios ya inactivos (cuota de Valentina, excepción Ironman/Champion, toda la historia de la bolsa Buk, la secuencia fija de octubre, la pausa de Valentina) se condensaron a 1-3 líneas cada uno dentro del prompt, con referencia a este archivo como fuente del historial completo. Ninguna regla vigente se tocó — solo historia. Objetivo: reducir el consumo de tokens de cada corrida (~10 corridas/día procesaban el texto completo).
 
+### 🟢 CAMBIO 2026-11-20 — bloqueo duro de Sofia Bello (licencia, hasta 2027-01-12)
+Pedido por el usuario: Sofia Bello (21983447) no debe recibir NINGUNA reunión nueva desde el 2026-11-20 hasta el 2027-01-12 inclusive. A diferencia de la pausa de Valentina de octubre (CAMBIO 2026-10-20 (b), despriorización de "último recurso" que igual podía tocarle si todos los demás quedaban bloqueados), esta es un **EXCLUDE real, sin excepción**: durante este periodo ella nunca aparece en ningún orden de candidatos, en ninguno de los 3 caminos de asignación —
+
+- **Balanceo normal** (`rank_balanceo`): se filtra fuera de `eligible` antes de calcular pesos/orden, no solo se la manda al final. Si ella fuera la única disponible para un deal, el deal queda **sin asignar** (aviso crítico, acción manual) en vez de caerle a ella — justo lo que la despriorización de Valentina NO garantizaba.
+- **Rotación organic/google**: se filtra de `reposition_order` y `normal_order` antes de armar el orden final — su turno en el ciclo fijo se salta por completo mientras dure el bloqueo (no se "guarda" para después; al reactivarse, el ciclo simplemente retoma donde `og_ptr` esté).
+- **Las 3 formas de continuidad** (`find_won_owner_continuity`, `find_continuity`, `find_sql_date_continuity`): cada una ahora itera sus candidatos ordenados por fecha y SALTA cualquiera cuyo CM sea Sofia durante el bloqueo, devolviendo el siguiente candidato real más reciente que no sea ella (si la organización tiene más de un deal Won/Lost/SQL-date con distintos dueños) — si no queda ninguno, la función devuelve `None` y el deal cae a balanceo normal (que también la excluye). Es decir: si una cuenta "es de ella" por historial, ese deal nuevo igual se reasigna a otro SE mientras dure el bloqueo.
+
+Implementación: nuevas constantes `HARD_BLOCKED_CMS = {21983447}` y `HARD_BLOCK_UNTIL = "2027-01-12"` en el script del paso 4. **NO aplica** a autoasignación BDR=SE (identidad fija sin alternativa, igual que siempre — caso prácticamente imposible de todas formas, ya que ella no actúa como BDR) ni a la regla temporal histórica de septiembre (inactiva). Se agregó una sección de reporte nueva al paso 6: cada corrida reporta explícitamente si algún deal se vio afectado por este bloqueo (quién habría sido la asignación ideal vs. quién quedó asignado en su lugar), o dice explícitamente "sin impacto" si ninguno se vio afectado. El mecanismo se desactiva solo después de `HARD_BLOCK_UNTIL`, sin que haga falta tocar nada.
+
+Validado con fixture antes del push: (1) un deal de balanceo donde Sofia tenía la carga más baja de todo el equipo quedó correctamente excluida del orden; (2) un deal organic/google saltó su turno en la rotación; (3) una organización con dos deals Won (uno de Sofia más reciente, otro de Daniel más antiguo) correctamente cayó en Daniel por continuidad, no en balanceo.
+
 ---
 
 ## Decisión de asignación vigente (cascade, en orden)
@@ -119,6 +130,8 @@ Los párrafos de changelog del prompt que documentaban cambios ya inactivos (cuo
 6. **Balanceo normal**: round-robin ponderado por carga combinada (atendidas últimos 30 días + pendientes futuras), sin repetir al último asignado.
 
 Todo (salvo BDR=SE y la regla temporal) pasa por el chequeo de disponibilidad: OOO de día completo + conflicto puntual en la ventana [hora reunión, +50 min] en la zona horaria real del cliente (por "Country"), donde "ocupado" = evento con responseStatus "accepted" o sin lista de attendees.
+
+**Bloqueo activo:** Sofia Bello (21983447) está excluida de los 3 caminos de asignación (balanceo, organic/google, continuidad) desde 2026-11-20 hasta 2027-01-12 inclusive — ver CAMBIO 2026-11-20 arriba.
 
 ## Pool actual (Grupo SE)
 
