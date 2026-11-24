@@ -3,7 +3,7 @@ name: Lead SAL Archive
 on:
   schedule:
     - cron: "0 17 * * 1-5"  # Lun-Vie 12pm Colombia (UTC-5 -> 17:00 UTC)
-    - cron: "0 0 * * 2-6"   # Lun-Vie 7pm Colombia (UTC-5 -> 00:00 UTC martes-sab)
+    - cron: "0 2 * * 2-6"   # Lun-Vie 9pm Colombia (UTC-5 -> 02:00 UTC martes-sab)
   workflow_dispatch:
     inputs:
       test_mode:
