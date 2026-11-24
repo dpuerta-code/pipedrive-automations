@@ -312,7 +312,7 @@ def fetch_recent_activity_dates_by_org(person_cache):
     """org_id -> lista de (date_str, user_id) de contacto reciente.
     Trae user_id=0 (todos) para luego filtrar por owner de cada lead."""
     start_date = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
-    end_date = date.today().isoformat()
+    end_date = (date.today() + timedelta(days=1)).isoformat()  # +1 para incluir actividades de hoy (end_date es exclusivo en Pipedrive)
     by_org = {}
     for t in CONTACT_ACTIVITY_TYPES:
         start = 0
@@ -839,7 +839,7 @@ def main():
             # Un solo barrido de actividades para el período completo
             total_days = ARCHIVED_LOOKBACK_DAYS + WINDOW_DAYS
             act_start_str = (date.today() - timedelta(days=total_days)).isoformat()
-            act_end_str = date.today().isoformat()
+            act_end_str = (date.today() + timedelta(days=1)).isoformat()  # +1 para incluir actividades de hoy
             print(f"Buscando actividades ({act_start_str} → {act_end_str}, {total_days} días)...")
             backfill_dates = fetch_activities_window_by_org(act_start_str, act_end_str, person_cache)
             print(f"Orgs con actividad en la ventana: {len(backfill_dates)}\n")
