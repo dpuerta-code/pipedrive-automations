@@ -220,9 +220,10 @@ def get_apollo_mailboxes():
 
 def resolve_sender_account_id(owner_id, apollo_mailboxes):
     """
-    Siempre envía desde @slangprogram.com. Toma el local-part del email del owner en
-    Pipedrive y busca <local-part>@slangprogram.com en Apollo. Si no hay match, cae al
-    default (a.rozo@slangprogram.com).
+    Toma el local-part del email del owner en Pipedrive y busca primero
+    <local-part>@slangprogram.com en Apollo; si no existe, intenta con el email
+    original del owner (cubre casos como j.penuela@slangapp.com que no tiene
+    @slangprogram.com). Si ninguno existe, cae al default (a.rozo@slangprogram.com).
     """
     owner_email = get_pipedrive_user_email(owner_id) if owner_id else None
     if owner_email:
@@ -230,6 +231,9 @@ def resolve_sender_account_id(owner_id, apollo_mailboxes):
         slangprogram_email = f"{local_part}@slangprogram.com"
         if slangprogram_email in apollo_mailboxes:
             return apollo_mailboxes[slangprogram_email], slangprogram_email
+        # Fallback: intentar con el email original del owner (puede ser @slangapp.com)
+        if owner_email in apollo_mailboxes:
+            return apollo_mailboxes[owner_email], owner_email
     return SEND_FROM_EMAIL_ACCOUNT_ID, None
 
 
