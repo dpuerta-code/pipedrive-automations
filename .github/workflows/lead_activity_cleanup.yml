@@ -2,7 +2,7 @@ name: Lead Activity Cleanup
 
 on:
   schedule:
-    - cron: "30 0 * * *"   # 7:30pm Colombia (UTC-5 → 00:30 UTC) — después del lead_sal_archive
+    - cron: "10 1 * * *"   # 8:10pm Colombia (UTC-5 → 01:10 UTC)
   workflow_dispatch:
     inputs:
       test_mode:
