@@ -2,7 +2,7 @@ name: Outbound Connection Gap Filler
 
 on:
   schedule:
-    - cron: "13 9 * * 1-5"   # Lunes-viernes ~4am Colombia (UTC-5 -> 09:13 UTC)
+    - cron: "7 7 * * 1-5"    # Lunes-viernes 2:07am Colombia (UTC-5 -> 07:07 UTC)
   workflow_dispatch:
     inputs:
       test_mode:
