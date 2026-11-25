@@ -59,6 +59,12 @@ MOTOR_BDR_TAB = "Sheet1"
 # en la rotacion (hueco de la ronda), o cuando el territorio es desconocido.
 FALLBACK_OWNER_ID = 22926796  # Sofia Puerta (d.puerta@slangapp.com)
 
+# Fecha a partir de la cual el procesador vuelve a actuar sobre filas
+# 'pending'. Las ~142 pendientes acumuladas entre el 2026-09-21 (COMPOSIO_API_KEY
+# vencido) y esta fecha se dejan intactas en el Sheet como registro historico --
+# no se procesan ni se borran, simplemente no se tocan nunca.
+PROCESS_PENDING_FROM = date(2026, 11, 17)
+
 LEAD_MARKER = "Prospección Claude"
 CAMPAING_FIELD_KEY = "cba00ea5c8cac481d5c79d3d0d45c831d1891b47"
 CAMPAING_YES = 1453
@@ -203,14 +209,18 @@ def _mcp_ensure_session():
     _mcp_request("notifications/initialized")
 
 
-def composio_execute(tool_slug, arguments, _retries=3):
+def composio_execute(tool_slug, arguments, _retries=5):
     """Ejecuta una accion de Composio (Google Sheets) via el endpoint MCP,
     reusando la conexion de Google ya autorizada en Composio — evita
     depender de un service account de Google Cloud.
 
     El endpoint MCP de Composio a veces devuelve una respuesta vacia/sin
     'result' de forma transitoria; se reintenta unas pocas veces antes de
-    fallar de verdad."""
+    fallar de verdad. La API de Google Sheets tiene ademas una cuota de
+    lecturas por minuto compartida por la conexion -- si se excede (429,
+    'Quota exceeded ... Read requests per minute'), se espera con backoff
+    largo (lo suficiente para que la ventana de 1 minuto se libere) en vez
+    de fallar de inmediato."""
     last_error = None
     for attempt in range(_retries):
         try:
@@ -221,7 +231,14 @@ def composio_execute(tool_slug, arguments, _retries=3):
             })
             content = resp["result"]["content"][0]["text"]
             payload = json.loads(content)
-            if payload.get("error"):
+            full_error_text = json.dumps(payload)
+            if payload.get("error") or "Quota exceeded" in full_error_text or "429" in full_error_text:
+                if "Quota exceeded" in full_error_text or "429" in full_error_text:
+                    last_error = RuntimeError(f"Composio error ({tool_slug}): {full_error_text[:500]}")
+                    wait = 20 * (attempt + 1)
+                    print(f"    [rate limit] {tool_slug}: cuota de Sheets excedida, esperando {wait}s (intento {attempt+1}/{_retries})")
+                    time.sleep(wait)
+                    continue
                 raise RuntimeError(f"Composio error ({tool_slug}): {payload['error']}")
             result = payload["data"]["results"][0]
             response = result["response"]
@@ -230,6 +247,15 @@ def composio_execute(tool_slug, arguments, _retries=3):
             return response["data"]
         except (KeyError, TypeError, requests.RequestException) as e:
             last_error = e
+            # DEBUG TEMPORAL -- quitar una vez diagnosticado el KeyError('data')
+            # intermitente que no reproduce localmente via curl.
+            try:
+                print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | payload={json.dumps(payload)[:1500]}")
+            except Exception:
+                try:
+                    print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | resp crudo={json.dumps(resp)[:1500]}")
+                except Exception as debug_err:
+                    print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | no se pudo serializar nada: {debug_err}")
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
 
@@ -244,27 +270,75 @@ def col_letter(idx0):
     return letters
 
 
-def sheet_get_records(sheet_name):
-    """Lee todas las filas de un tab como (header, lista de dicts), igual que
-    gspread's get_all_records()."""
-    data = composio_execute("GOOGLESHEETS_BATCH_GET", {
-        "spreadsheet_id": QUEUE_SPREADSHEET_ID,
-        "ranges": [f"{sheet_name}!A1:Z2000"],
+# Filas por llamada al leer un tab completo. Un solo GOOGLESHEETS_BATCH_GET
+# sobre un tab grande (ej. Sheet1 de la Cola de Leads con 238+ filas x 26
+# columnas) supera el limite de tamaño de respuesta de Composio (~15k
+# tokens) y vuelve truncado -- "data_preview" en vez de "data" real, con el
+# payload completo guardado en un sandbox remoto al que este script (corre
+# en GitHub Actions, no en el sandbox de Composio) no tiene forma de acceder.
+# Se pagina en bloques chicos para que cada respuesta individual quede
+# siempre muy por debajo de ese limite, sin importar cuanto crezca el tab.
+SHEET_READ_CHUNK_ROWS = 100
+
+
+def _sheet_get_records_paginated(spreadsheet_id, sheet_name, last_col, max_rows=5000):
+    """Lee un tab completo en bloques de SHEET_READ_CHUNK_ROWS filas y lo
+    arma como (header, lista de dicts), igual que gspread's
+    get_all_records()."""
+    header_data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+        "spreadsheet_id": spreadsheet_id,
+        "ranges": [f"{sheet_name}!A1:{last_col}1"],
     })
-    values = data["valueRanges"][0].get("values", [])
-    if not values:
+    header_values = header_data["valueRanges"][0].get("values", [])
+    if not header_values:
         return [], []
-    header = values[0]
+    header = header_values[0]
+
+    all_rows = []
+    start_row = 2
+    while start_row <= max_rows:
+        end_row = start_row + SHEET_READ_CHUNK_ROWS - 1
+        data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+            "spreadsheet_id": spreadsheet_id,
+            "ranges": [f"{sheet_name}!A{start_row}:{last_col}{end_row}"],
+        })
+        values = data["valueRanges"][0].get("values", [])
+        if not values:
+            break
+        all_rows.extend(values)
+        if len(values) < SHEET_READ_CHUNK_ROWS:
+            break
+        start_row = end_row + 1
+
     records = []
-    for row in values[1:]:
+    for row in all_rows:
         row = row + [""] * (len(header) - len(row))
         records.append(dict(zip(header, row)))
     return header, records
 
 
+def sheet_get_records(sheet_name):
+    """Igual que _sheet_get_records_paginated, contra la Cola de Leads."""
+    return _sheet_get_records_paginated(QUEUE_SPREADSHEET_ID, sheet_name, last_col="Z")
+
+
 def current_week_monday():
     today = date.today()
     return today - timedelta(days=today.weekday())
+
+
+def parse_queue_timestamp(raw):
+    """Parsea el timestamp tal como lo escribe doGet() (new Date() serializado
+    por Sheets en el locale en_US de la hoja, ej. '11/17/2026 12:19:29').
+    Devuelve None si no se puede parsear -- en ese caso la fila NO se filtra
+    por fecha (se trata como pendiente a procesar, nunca se pierde en limbo)."""
+    raw = str(raw).strip()
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def load_rotation_map():
@@ -284,6 +358,25 @@ def load_rotation_map():
     return rotation_map
 
 
+def load_email_owner_map():
+    """Lee el tab Rotacion y arma {owner_email: owner_id}, deduplicado (el
+    mismo BDR siempre tiene el mismo owner_id en Pipedrive sin importar la
+    semana). Se usa para que el Lead quede asignado a quien dio click en
+    Metabase (columna clicked_by_email), en vez de a la rotacion semanal
+    por territorio."""
+    _, records = sheet_get_records(ROTATION_TAB)
+    email_owner_map = {}
+    for row in records:
+        email = str(row.get("owner_email", "")).strip().lower()
+        try:
+            owner_id = int(row.get("owner_id"))
+        except (TypeError, ValueError):
+            continue
+        if email:
+            email_owner_map[email] = owner_id
+    return email_owner_map
+
+
 def get_territory_owner(rotation_map, territorio):
     """owner_id para el territorio en la semana actual, o FALLBACK_OWNER_ID si
     el territorio esta vacio en la rotacion de esta semana (o es desconocido)."""
@@ -293,6 +386,18 @@ def get_territory_owner(rotation_map, territorio):
         return FALLBACK_OWNER_ID
     monday = current_week_monday().isoformat()
     return rotation_map.get((monday, territorio), FALLBACK_OWNER_ID)
+
+
+def resolve_owner_id(rotation_map, email_owner_map, row):
+    """El Lead debe quedar asignado a quien hizo click en Metabase
+    (clicked_by_email), no al territorio. Fallback a la rotacion semanal por
+    territorio solo si la fila no trae clicked_by_email (filas viejas, de
+    antes de que esa columna existiera) o si ese email no esta en el roster
+    de Rotacion (ej. alguien fuera del equipo de BDRs)."""
+    clicked_by = str(row.get("clicked_by_email", "")).strip().lower()
+    if clicked_by and clicked_by in email_owner_map:
+        return email_owner_map[clicked_by]
+    return get_territory_owner(rotation_map, row.get("territorio"))
 
 
 def existing_program_lead(org_id, person_id=None):
@@ -527,7 +632,7 @@ def ensure_lead_and_campaing(org_id, sheet_company, org_category, contact_nombre
     return lead_id, person_id
 
 
-def process_mark_campaign(row, rotation_map):
+def process_mark_campaign(row, rotation_map, email_owner_map):
     org_id = int(row["org_id"])
     sheet_company = row["sheet_company"]
     org_category = row.get("org_category") or "Coverage"
@@ -540,7 +645,7 @@ def process_mark_campaign(row, rotation_map):
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
     company_size = row.get("company_size", "")
-    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+    owner_id = resolve_owner_id(rotation_map, email_owner_map, row)
 
     lead_id, person_id = ensure_lead_and_campaing(
         org_id, sheet_company, org_category, contact_nombre, email, telefono, cargo, linkedin, owner_id,
@@ -549,7 +654,7 @@ def process_mark_campaign(row, rotation_map):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def process_create_lead_no_campaign(row, rotation_map):
+def process_create_lead_no_campaign(row, rotation_map, email_owner_map):
     """Para orgs Coverage ya matcheadas con un contacto nuevo (Contacto_Estado
     = 'New') cuando NO se quiere mandar a campaña todavia: busca o crea la
     Persona dentro de la organizacion existente y crea el Lead del programa,
@@ -565,7 +670,7 @@ def process_create_lead_no_campaign(row, rotation_map):
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
     company_size = row.get("company_size", "")
-    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+    owner_id = resolve_owner_id(rotation_map, email_owner_map, row)
 
     if not TEST_MODE:
         enrich_existing_org(org_id, domain, website, org_linkedin, company_size)
@@ -596,7 +701,7 @@ def process_create_lead_no_campaign(row, rotation_map):
     return {"status": "done", "result_org_id": org_id, "result_person_id": person_id, "result_lead_id": lead_id, "error_message": ""}
 
 
-def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
+def process_create_org_lead(row, rotation_map, email_owner_map, mark_campaign_after=False):
     """Crea Organizacion + Persona + Lead (con chequeo de duplicados).
     mark_campaign_after=True se usa cuando esta creacion se disparo desde el
     link "Marcar Campaña" en una fila Posible New (ahi si se marca Campaing=Yes).
@@ -613,7 +718,7 @@ def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
     domain = row.get("domain", "")
     website = row.get("website", "")
     org_linkedin = row.get("org_linkedin", "")
-    owner_id = get_territory_owner(rotation_map, row.get("territorio"))
+    owner_id = resolve_owner_id(rotation_map, email_owner_map, row)
 
     name_match = find_org_by_name(sheet_company)
     if name_match:
@@ -676,20 +781,9 @@ def process_create_org_lead(row, rotation_map, mark_campaign_after=False):
 
 def sheet_get_records_from(spreadsheet_id, sheet_name):
     """Igual que sheet_get_records pero contra un spreadsheet_id arbitrario
-    (Motor BDR vive en una hoja distinta a la Cola de Leads)."""
-    data = composio_execute("GOOGLESHEETS_BATCH_GET", {
-        "spreadsheet_id": spreadsheet_id,
-        "ranges": [f"{sheet_name}!A1:AE2000"],
-    })
-    values = data["valueRanges"][0].get("values", [])
-    if not values:
-        return [], []
-    header = values[0]
-    records = []
-    for row in values[1:]:
-        row = row + [""] * (len(header) - len(row))
-        records.append(dict(zip(header, row)))
-    return header, records
+    (Motor BDR vive en una hoja distinta a la Cola de Leads, y tiene todavia
+    mas filas -- tambien paginado por la misma razon)."""
+    return _sheet_get_records_paginated(spreadsheet_id, sheet_name, last_col="AE")
 
 
 NO_SIRVE_NOTE = "No sirve - excluido"
@@ -768,9 +862,24 @@ def main():
 
     header, records = sheet_get_records(QUEUE_TAB)
     rotation_map = load_rotation_map()
+    email_owner_map = load_email_owner_map()
 
-    pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
-    print(f"Filas pendientes: {len(pending)}\n")
+    all_pending = [(i + 2, r) for i, r in enumerate(records) if r.get("status") == "pending"]
+    pending, skipped_historical = [], []
+    for row_num, row in all_pending:
+        queue_date = parse_queue_timestamp(row.get("timestamp"))
+        if queue_date is not None and queue_date < PROCESS_PENDING_FROM:
+            skipped_historical.append((row_num, row))
+        else:
+            pending.append((row_num, row))
+
+    if skipped_historical:
+        print(
+            f"Filas pendientes historicas (anteriores a {PROCESS_PENDING_FROM.isoformat()}, "
+            f"acumuladas durante la interrupcion del COMPOSIO_API_KEY): {len(skipped_historical)}. "
+            "No se tocan -- quedan como registro historico en el Sheet."
+        )
+    print(f"Filas pendientes a procesar: {len(pending)}\n")
 
     stats = {"done": 0, "needs_review": 0, "error": 0}
 
@@ -786,13 +895,13 @@ def main():
                     # asi que "Marcar Campaña" crea Org+Persona+Lead Y marca
                     # Campaing=Yes (a diferencia de "Crear Org + Lead", que
                     # crea todo pero NO marca Campaing).
-                    result = process_create_org_lead(row, rotation_map, mark_campaign_after=True)
+                    result = process_create_org_lead(row, rotation_map, email_owner_map, mark_campaign_after=True)
                 else:
-                    result = process_mark_campaign(row, rotation_map)
+                    result = process_mark_campaign(row, rotation_map, email_owner_map)
             elif action == "create_org_lead":
-                result = process_create_org_lead(row, rotation_map)
+                result = process_create_org_lead(row, rotation_map, email_owner_map)
             elif action == "create_lead_no_campaign":
-                result = process_create_lead_no_campaign(row, rotation_map)
+                result = process_create_lead_no_campaign(row, rotation_map, email_owner_map)
             elif action == "empresa_no_sirve":
                 result = process_empresa_no_sirve(row)
             elif action == "persona_no_sirve":
