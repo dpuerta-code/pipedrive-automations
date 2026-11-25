@@ -209,6 +209,16 @@ def _mcp_ensure_session():
     _mcp_request("notifications/initialized")
 
 
+class ComposioResponseTruncated(Exception):
+    """La respuesta de Composio fue demasiado grande y volvio como
+    'data_preview' en vez de 'data' real -- el payload completo queda en un
+    sandbox remoto (Composio) al que este script, corriendo en GitHub
+    Actions, no tiene forma de acceder. No es transitorio: reintentar el
+    mismo rango no ayuda (el mismo request vuelve a truncarse identico),
+    hay que pedir menos filas."""
+    pass
+
+
 def composio_execute(tool_slug, arguments, _retries=5):
     """Ejecuta una accion de Composio (Google Sheets) via el endpoint MCP,
     reusando la conexion de Google ya autorizada en Composio — evita
@@ -220,7 +230,9 @@ def composio_execute(tool_slug, arguments, _retries=5):
     lecturas por minuto compartida por la conexion -- si se excede (429,
     'Quota exceeded ... Read requests per minute'), se espera con backoff
     largo (lo suficiente para que la ventana de 1 minuto se libere) en vez
-    de fallar de inmediato."""
+    de fallar de inmediato. ComposioResponseTruncated se deja propagar sin
+    reintentar (ver la clase) -- quien pida rangos de sheet debe capturarla
+    y pedir un rango mas chico."""
     last_error = None
     for attempt in range(_retries):
         try:
@@ -231,31 +243,24 @@ def composio_execute(tool_slug, arguments, _retries=5):
             })
             content = resp["result"]["content"][0]["text"]
             payload = json.loads(content)
-            full_error_text = json.dumps(payload)
-            if payload.get("error") or "Quota exceeded" in full_error_text or "429" in full_error_text:
-                if "Quota exceeded" in full_error_text or "429" in full_error_text:
-                    last_error = RuntimeError(f"Composio error ({tool_slug}): {full_error_text[:500]}")
-                    wait = 20 * (attempt + 1)
-                    print(f"    [rate limit] {tool_slug}: cuota de Sheets excedida, esperando {wait}s (intento {attempt+1}/{_retries})")
-                    time.sleep(wait)
-                    continue
+            full_text = json.dumps(payload)
+            if "Quota exceeded" in full_text or "Read requests per minute" in full_text:
+                last_error = RuntimeError(f"Composio error ({tool_slug}): cuota de Sheets excedida")
+                wait = 20 * (attempt + 1)
+                print(f"    [rate limit] {tool_slug}: cuota de Sheets excedida, esperando {wait}s (intento {attempt+1}/{_retries})")
+                time.sleep(wait)
+                continue
+            if payload.get("error"):
                 raise RuntimeError(f"Composio error ({tool_slug}): {payload['error']}")
             result = payload["data"]["results"][0]
             response = result["response"]
             if not response.get("successful"):
                 raise RuntimeError(f"Composio tool {tool_slug} fallo: {response}")
+            if "data" not in response:
+                raise ComposioResponseTruncated(f"{tool_slug}: respuesta truncada (data_preview)")
             return response["data"]
         except (KeyError, TypeError, requests.RequestException) as e:
             last_error = e
-            # DEBUG TEMPORAL -- quitar una vez diagnosticado el KeyError('data')
-            # intermitente que no reproduce localmente via curl.
-            try:
-                print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | payload={json.dumps(payload)[:1500]}")
-            except Exception:
-                try:
-                    print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | resp crudo={json.dumps(resp)[:1500]}")
-                except Exception as debug_err:
-                    print(f"    [DEBUG] intento {attempt+1} {type(e).__name__}: {e} | no se pudo serializar nada: {debug_err}")
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Composio tool {tool_slug} fallo tras {_retries} intentos: {last_error}")
 
@@ -270,21 +275,45 @@ def col_letter(idx0):
     return letters
 
 
-# Filas por llamada al leer un tab completo. Un solo GOOGLESHEETS_BATCH_GET
-# sobre un tab grande (ej. Sheet1 de la Cola de Leads con 238+ filas x 26
-# columnas) supera el limite de tamaño de respuesta de Composio (~15k
-# tokens) y vuelve truncado -- "data_preview" en vez de "data" real, con el
-# payload completo guardado en un sandbox remoto al que este script (corre
-# en GitHub Actions, no en el sandbox de Composio) no tiene forma de acceder.
-# Se pagina en bloques chicos para que cada respuesta individual quede
-# siempre muy por debajo de ese limite, sin importar cuanto crezca el tab.
-SHEET_READ_CHUNK_ROWS = 100
+# Tamaño inicial de bloque al leer un tab completo. Un solo GOOGLESHEETS_BATCH_GET
+# sobre un tab grande (ej. Sheet1 de la Cola de Leads con 238+ filas) puede
+# superar el limite de tamaño de respuesta de Composio y volver truncado
+# ("data_preview" en vez de "data" real, con el payload completo guardado en
+# un sandbox remoto al que este script -- corre en GitHub Actions, no en el
+# sandbox de Composio -- no tiene forma de acceder). El umbral real depende
+# del CONTENIDO (columnas con texto largo truncan con menos filas que
+# columnas cortas), medido empiricamente entre 85 filas (OK) y 100 (trunca)
+# para esta hoja -- por eso no se usa un numero fijo de filas por si solo:
+# ver _fetch_range_rows, que detecta el truncamiento y parte el rango a la
+# mitad automaticamente en vez de confiar en un tamaño de chunk fijo.
+SHEET_READ_CHUNK_ROWS = 60
+
+
+def _fetch_range_rows(spreadsheet_id, sheet_name, last_col, start_row, end_row, _depth=0):
+    """Pide un rango de filas (start_row..end_row) via GOOGLESHEETS_BATCH_GET.
+    Si Composio lo trunca por tamaño (ComposioResponseTruncated), parte el
+    rango en dos mitades y reintenta cada una por separado (recursivo) --
+    mas confiable que un tamaño de chunk fijo, porque el umbral real de
+    truncamiento varia segun cuanto texto tenga cada fila."""
+    try:
+        data = composio_execute("GOOGLESHEETS_BATCH_GET", {
+            "spreadsheet_id": spreadsheet_id,
+            "ranges": [f"{sheet_name}!A{start_row}:{last_col}{end_row}"],
+        })
+        return data["valueRanges"][0].get("values", [])
+    except ComposioResponseTruncated:
+        if end_row <= start_row or _depth > 12:
+            raise
+        mid = start_row + (end_row - start_row) // 2
+        left = _fetch_range_rows(spreadsheet_id, sheet_name, last_col, start_row, mid, _depth + 1)
+        right = _fetch_range_rows(spreadsheet_id, sheet_name, last_col, mid + 1, end_row, _depth + 1)
+        return left + right
 
 
 def _sheet_get_records_paginated(spreadsheet_id, sheet_name, last_col, max_rows=5000):
-    """Lee un tab completo en bloques de SHEET_READ_CHUNK_ROWS filas y lo
-    arma como (header, lista de dicts), igual que gspread's
-    get_all_records()."""
+    """Lee un tab completo en bloques de SHEET_READ_CHUNK_ROWS filas (con
+    particion automatica si un bloque trunca) y lo arma como (header, lista
+    de dicts), igual que gspread's get_all_records()."""
     header_data = composio_execute("GOOGLESHEETS_BATCH_GET", {
         "spreadsheet_id": spreadsheet_id,
         "ranges": [f"{sheet_name}!A1:{last_col}1"],
@@ -298,11 +327,7 @@ def _sheet_get_records_paginated(spreadsheet_id, sheet_name, last_col, max_rows=
     start_row = 2
     while start_row <= max_rows:
         end_row = start_row + SHEET_READ_CHUNK_ROWS - 1
-        data = composio_execute("GOOGLESHEETS_BATCH_GET", {
-            "spreadsheet_id": spreadsheet_id,
-            "ranges": [f"{sheet_name}!A{start_row}:{last_col}{end_row}"],
-        })
-        values = data["valueRanges"][0].get("values", [])
+        values = _fetch_range_rows(spreadsheet_id, sheet_name, last_col, start_row, end_row)
         if not values:
             break
         all_rows.extend(values)
